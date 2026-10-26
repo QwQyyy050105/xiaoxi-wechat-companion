@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32",
+  "experimental": true,
+  "builds": [
+    {
+      "version": "4.1.15.56",
+      "dllSha256": "e0428a7b691853de496532523c2c09aa095f90941c37c9f4cfb3f137f3c66556",
+      "capabilities": [
+        "group_text_read",
+        "group_text_send_background",
+        "platform_transcript",
+        "image_cache_candidates"
+      ]
+    }
+  ]
+}

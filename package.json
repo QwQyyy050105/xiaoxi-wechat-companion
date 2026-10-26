@@ -1,0 +1,27 @@
+{
+  "name": "xiaoxi-wechat-companion",
+  "version": "0.4.0",
+  "private": false,
+  "description": "Configurable local AI companion with an experimental Windows WeChat adapter",
+  "type": "module",
+  "main": "desktop.cjs",
+  "scripts": {
+    "init": "node scripts/cli.mjs init",
+    "doctor": "node scripts/cli.mjs doctor",
+    "demo": "node scripts/cli.mjs demo",
+    "test": "node scripts/test.mjs",
+    "start": "electron desktop.cjs",
+    "check:release": "node scripts/release_check.mjs",
+    "panel": "node scripts/cli.mjs panel",
+    "native:prepare": "node scripts/cli.mjs native-prepare"
+  },
+  "dependencies": {
+    "electron": "45.0.0",
+    "qrcode": "1.5.4",
+    "json-bigint": "1.0.0"
+  },
+  "engines": {
+    "node": ">=20.16"
+  },
+  "license": "Apache-2.0"
+}

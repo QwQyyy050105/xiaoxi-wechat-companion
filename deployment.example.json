@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "account": {
+    "displayName": "",
+    "folder": "",
+    "cacheRoot": "",
+    "wxid": ""
+  },
+  "character": {
+    "id": "xiaoxi",
+    "name": "小汐",
+    "aliases": [
+      "小汐"
+    ]
+  },
+  "targets": [],
+  "native": {
+    "enabled": false,
+    "mediaCache": false,
+    "allowModuleDataScan": false
+  },
+  "model": {
+    "provider": "mock",
+    "model": "mock",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKeyEnv": "",
+    "stream": true,
+    "timeoutMs": 120000,
+    "retries": 1,
+    "vision": false
+  },
+  "extensions": []
+}

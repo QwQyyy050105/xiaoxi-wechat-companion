@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "account": {
+    "displayName": "Example Account",
+    "folder": "wxid_example_0000"
+  },
+  "character": {
+    "id": "xiaoxi",
+    "name": "小汐",
+    "aliases": [
+      "小汐",
+      "Example Account"
+    ]
+  },
+  "targets": [
+    {
+      "id": "group_abao",
+      "name": "Example Group A",
+      "kind": "group",
+      "wechatPeerId": "10000001@chatroom"
+    },
+    {
+      "id": "group_family",
+      "name": "Example Group B",
+      "kind": "group",
+      "wechatPeerId": "10000002@chatroom"
+    }
+  ],
+  "native": {
+    "enabled": false,
+    "allowModuleDataScan": false
+  },
+  "model": {
+    "provider": "codex",
+    "model": "gpt-6-astra",
+    "vision": true
+  }
+}

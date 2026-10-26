@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 2,
+  "groups": {
+    "group_family": {
+      "title": "Example Group B",
+      "perspectivePersonId": "person_designer",
+      "people": [
+        {
+          "id": "person_designer",
+          "displayName": "设计人",
+          "notes": [
+            "Synthetic test fixture"
+          ]
+        },
+        {
+          "id": "member_e",
+          "displayName": "Member E",
+          "notes": [
+            "Synthetic test fixture"
+          ]
+        },
+        {
+          "id": "person_a",
+          "displayName": "Member A",
+          "notes": [
+            "Synthetic test fixture"
+          ]
+        },
+        {
+          "id": "person_b",
+          "displayName": "Member B",
+          "notes": [
+            "Synthetic test fixture"
+          ]
+        },
+        {
+          "id": "person_c",
+          "displayName": "Member C",
+          "notes": [
+            "Synthetic test fixture"
+          ]
+        },
+        {
+          "id": "person_d",
+          "displayName": "Member D",
+          "notes": [
+            "Synthetic test fixture"
+          ]
+        }
+      ],
+      "relationships": [
+        {
+          "from": "person_designer",
+          "to": "member_e",
+          "type": "team_role",
+          "label": "维护者"
+        },
+        {
+          "from": "person_designer",
+          "to": "person_a",
+          "type": "team_role",
+          "label": "审阅者"
+        },
+        {
+          "from": "person_designer",
+          "to": "person_b",
+          "type": "team_role",
+          "label": "开发者"
+        },
+        {
+          "from": "person_designer",
+          "to": "person_c",
+          "type": "team_role",
+          "label": "测试者"
+        },
+        {
+          "from": "person_designer",
+          "to": "person_d",
+          "type": "team_role",
+          "label": "贡献者"
+        },
+        {
+          "from": "person_a",
+          "to": "person_d",
+          "type": "team_role",
+          "label": "协作者"
+        }
+      ]
+    }
+  }
+}

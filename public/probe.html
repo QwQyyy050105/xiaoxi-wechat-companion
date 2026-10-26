@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self';script-src 'self';style-src 'self';img-src 'self' data:;connect-src 'none';object-src 'none';frame-src 'none';base-uri 'none'"><title>微信连接自测</title><link rel="stylesheet" href="probe.css"></head>
+<body><main><p class="eyebrow">XIAOXI / CONNECTION TEST</p><h1>先确认微信能连通</h1><p>这是一次连接测试，还不是正式机器人。测试结束后停止监听。</p>
+<ol><li id="step1">扫码连接官方 Bot 私聊通道</li><li id="step2">发送指定测试文字，验证接收和回复</li><li id="step3">在手机核对收到的回复</li></ol>
+<section aria-live="polite"><strong id="stage">待开始</strong><p id="message"></p><img id="qr" alt="用手机微信扫码连接" hidden><code id="nonce" hidden></code>
+<div id="verifyBox" hidden><label for="verify">手机提示的验证码</label><input id="verify" maxlength="32" autocomplete="off"><button id="verifyButton">提交验证码</button></div></section>
+<div class="actions"><button id="qrButton">获取官方通道二维码</button><button id="startButton" hidden>开始一次收发自测</button><button id="confirmButton" hidden>我已在微信收到回复</button><button id="stopButton">停止测试</button></div>
+<p class="note">自测只回应扫码者发来的指定文字一次。不会连接普通好友或群聊；普通微信号接入另行验证。请勿把“二维码可显示”当作“收发已通过”。</p>
+</main><script src="probe_ui.js"></script></body></html>
