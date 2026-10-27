@@ -14,6 +14,8 @@ npm run init
 npm run demo
 ```
 
+只需要浏览器面板和核心聊天时，可以把安装命令换为 `npm ci --omit=optional`。精简模式省略Electron 桌面外壳；具体能力差异与恢复方法见 [安装体积选择](docs/PORTABILITY.md#选择安装体积)。完整开发测试使用标准安装。
+
 打开命令行显示的 `http://127.0.0.1:8765`，在“本地试聊”发一句话。Mock 会明确标注“本机演示”，不会假装调用了模型或接通微信。按 Ctrl+C 关闭。端口占用可用 `npm run demo -- --port 8766`。
 
 ```sh
@@ -47,6 +49,8 @@ npm run panel
 API 基础地址应含提供方要求的版本路径，例如 `https://api.openai.com/v1`；程序在后面拼接 `/chat/completions`。远程地址要求 HTTPS；本机 `127.0.0.1/localhost/[::1]` 可以使用 HTTP。密钥不回显在状态 API、诊断或示例配置中。Codex 可用 `CODEX_CLI_PATH` 指定可执行文件；否则从 PATH 查找。认证沿用 CLI 自己的登录位置，不复制认证文件。默认调用带官方 `--ignore-user-config`，不继承本机 `CODEX_HOME/config.toml` 中的自定义 provider、MCP、hooks 或插件配置；认证位置仍保留，模型、搜索和工具限制由本程序显式传入。若你选的 CLI 模型依赖自定义 user config，请改用兼容 API 或审核过的本机 model 插件。旧 CLI 不认识这个隔离参数时直接报错，不会删除参数重试或换模型。
 
 API SSE 是**接收流式输出**，微信在完整且未取消后才发送，避免向群里连续刷半句。总超时默认 120 秒，可设 1–300 秒；默认最多重试 1 次，可设 0–2。只有尚未收到内容时的连接错误和 HTTP 429/502/503/504 会重试，已开始输出的请求不重试。取消会中止请求；Codex 超时/取消结束本次子进程，不自动重试。
+
+启动与模型核验分开：连接微信不会自动调用云端，也不等待模型自检。模型显示 `unchecked` 时，下一条新问题可以核验当前模型；只有实际提供者调用成功才显示就绪。手动“测试 AI”会真实调用所选后端，并与聊天互斥。网络/超时/限流失败按 2、4、8、16、最高 30 秒退避，由退避后的新问题尝试恢复，不后台轮询、不补发旧问题、不自动换模型。认证、配置、损坏响应或未知错误显示需要处理，修正后保存模型设置或手动测试。Mock 成功只代表本机演示。公开模板暂不并行复制同一模型请求，也没有相应的启用开关；额外额度与未来扩展要求见 EXTENDING。
 
 浏览器面板聊天保存在本机普通文件中。桌面版 `npm start` 使用 Electron 与操作系统密钥存储，加密保存聊天和可选的直接 API Key；操作系统密钥存储不可用时停止，不退回明文。演示、浏览器面板、桌面版分别存储在 `data/demo/`、`data/panel/`、`data/companion.enc`，不要相互复制加密状态。全部为 Git 忽略文件。
 
@@ -95,11 +99,13 @@ npm run native:prepare -- --dll "FULL_PATH_TO_INSTALLED_WECHAT_DLL"
 演示不需要 Python；Node 测试中的 Python/Win32 进程集成在缺少相应依赖时会明确 skip。Python 原生单元测试可在 Windows 环境安装上述依赖后运行：
 
 ```powershell
-$env:XIAOXI_CONFIG = "$PWD\test\fixtures\deployment.json"
-.\runtime\desktop_bridge\Scripts\python.exe -B -m unittest discover -s test -p "*_test.py"
+.\runtime\desktop_bridge\Scripts\python.exe -B scripts/test_native.py --check
+.\runtime\desktop_bridge\Scripts\python.exe -B scripts/test_native.py
 ```
 
-本仓库不含私人会话、机器人帐号凭据或个人媒体。发布前运行 `npm run check:release`。Apache-2.0；第三方研究与派生代码见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+Python 测试入口和每个原生测试模块都会先固定到已提交的虚构 `test/fixtures/deployment.json`，忽略调用者的 `XIAOXI_CONFIG`，不读取 `deployment.local.json`。直接运行 `python -B -m unittest discover -s test -p "*_test.py"` 也使用同一测试隔离。这个行为仅用于测试；真实程序没有配置时仍是零授权会话。
+
+本仓库不含私人会话、机器人帐号凭据或个人媒体。发布前运行 `npm run check:release`；本轮离线验收与未验证边界见 [VALIDATION](docs/VALIDATION.md)。Apache-2.0；第三方研究与派生代码见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## AI maintenance workflows
 

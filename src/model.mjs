@@ -1,3 +1,4 @@
+import {ModelCallError,classifyModelFailure} from './model_health.mjs';
 import {callCompatible} from './compatible_api.mjs';
 import {spawn} from 'node:child_process';
 import {readdir,stat,realpath,mkdir,writeFile,rm} from 'node:fs/promises';
@@ -252,14 +253,15 @@ export async function generate({settings,persona,session,memories,mediaInput,roo
     for(const key of Object.keys(env))if(/TOKEN|SECRET|PASSWORD|API_KEY/i.test(key))delete env[key];
     const child=spawn(executable,args,{cwd:path.join(root,'temp'),windowsHide:true,env,stdio:['pipe','pipe','pipe']});
     mark('spawnMs');
-    let buffer='',reply='',usage=null,done=false,searchUsed=false,committedResult=null; let bytes=0;
+    let buffer='',reply='',usage=null,done=false,searchUsed=false,committedResult=null; let bytes=0,failureCode='model_generation_failed';
+    const observeFailure=error=>{const code=classifyModelFailure(error),priority=['model_auth_required','model_configuration_error','model_rate_limited','model_network_error','model_timeout'];if(code!=='model_generation_failed'&&(failureCode==='model_generation_failed'||priority.indexOf(code)<priority.indexOf(failureCode)))failureCode=code;};
     child.stdout.setEncoding('utf8');
     const finish=(err,value)=>{if(done)return;done=true;clearTimeout(timer);signal.removeEventListener('abort',cancel);err?reject(err):resolve(value);};
-    const cancel=()=>{child.kill();finish(new Error('已停止生成'));};
-    const timer=setTimeout(()=>{child.kill();finish(new Error('Codex 本轮超时；未切换模型'));},settings.timeoutMs??120000);
+    const cancel=()=>{child.kill();finish(new ModelCallError('model_cancelled'));};
+    const timer=setTimeout(()=>{child.kill();finish(new ModelCallError(failureCode==='model_generation_failed'?'model_timeout':failureCode));},settings.timeoutMs??120000);
     signal.addEventListener('abort',cancel,{once:true});if(signal.aborted)cancel();
-    child.on('error',()=>finish(new Error('模型进程无法启动')));
-    child.stderr.on('data',()=>{});
+    child.on('error',()=>finish(new ModelCallError('model_configuration_error')));
+    child.stderr.on('data',chunk=>observeFailure(String(chunk)));
     child.stdout.on('data',chunk=>{
       if(done)return;
       bytes+=chunk.length;if(bytes>4*1024*1024){child.kill();finish(new Error('模型输出超过限制'));return;}
@@ -280,10 +282,11 @@ export async function generate({settings,persona,session,memories,mediaInput,roo
             child.kill();
           }
         }
-        if(e.type==='turn.failed'){child.kill();finish(new Error('Codex 本轮未完成；请检查登录状态、模型名称或额度。'));}
+        if(e.type==='error'||e.type==='turn.failed')observeFailure(e.error??e.message??'');
+        if(e.type==='turn.failed'){child.kill();finish(new ModelCallError(failureCode));}
       }catch{}}
     });
-    child.on('close',()=>{mark('closeMs');if(!done){if(committedResult)finish(null,committedResult);else finish(new Error('Codex 本轮未完成；请检查登录状态、模型名称或额度。'));}});
+    child.on('close',()=>{mark('closeMs');if(!done){if(committedResult)finish(null,committedResult);else finish(new ModelCallError(failureCode));}});
     child.stdin.on('error',()=>{});child.stdin.end(prompt);
   });}finally{await staged?.cleanup();}
 }

@@ -89,12 +89,12 @@ def post_verified_button(hwnd,button,root,region_bounds):
     return 'minimized_qt_client_messages' if minimized else 'target_hwnd_button_messages'
 
 def post_unread_button(hwnd,button,root):
-    messages=unique(root,lambda x:x.AutomationId=='chat_message_list','消息列表')
+    messages=unique_chrome(root,lambda x:x.AutomationId=='chat_message_list','消息列表')
     return post_verified_button(hwnd,button,root,rect(messages))
 
 def post_send_button(hwnd,button,root):
     if button.ControlTypeName!='ButtonControl' or button.Name!='发送' or not button.IsEnabled:raise RuntimeError('发送按钮身份变化，未提交')
-    field=unique(root,lambda x:x.AutomationId=='chat_input_field','输入框')
+    field=unique_chrome(root,lambda x:x.AutomationId=='chat_input_field','输入框')
     bounds=rect(root);editor=rect(field);button_bounds=rect(button)
     # The send button must be in the current input area, below the text field.
     if not editor[1]<=button_bounds[1]<button_bounds[3]<=bounds[3]:raise RuntimeError('发送按钮不在当前输入区域')
@@ -183,6 +183,45 @@ def unique_chrome(root,predicate,label):
     if len(matches)!=1:raise RuntimeError(label+'不唯一或不可访问')
     return matches[0]
 
+def unique_in(controls,predicate,label):
+    matches=[control for control in controls if predicate(control)]
+    if len(matches)!=1:raise RuntimeError(label+'不唯一或不可访问')
+    return matches[0]
+
+def walk_notices(root,limit=1600):
+    """Visit transient overlays without descending into bubbles or the editor.
+
+    The message-list container remains traversable because Qt places unread
+    buttons there. This view is rebuilt for every read; no stale UIA objects,
+    message content or identities are cached across polls or refresh actions.
+    """
+    stack=[root];count=0
+    while stack:
+        control=stack.pop();count+=1
+        if count>limit:raise RuntimeError('控件数量异常，已停止操作')
+        aid=control.AutomationId or ''
+        if aid=='chat_input_field' or aid.endswith('.chat_bubble_item_view') or aid.startswith('session_item_'):continue
+        yield control
+        stack.extend(reversed(control.GetChildren()))
+
+def message_bubbles(root,limit=1600):
+    """Enumerate message rows without expanding their rendered contents.
+
+    Bubble.Name is the native receiver's text/transcript contract. Embedded
+    quote/media controls are not additional messages; diagnostic reads expand
+    them separately. Rebuild the row list each time to observe delayed updates.
+    """
+    stack=[root];count=0
+    while stack:
+        control=stack.pop();count+=1
+        if count>limit:raise RuntimeError('消息列表控件数量异常，已停止读取')
+        aid=control.AutomationId or ''
+        if aid.endswith('.chat_bubble_item_view'):
+            yield control
+            continue
+        if aid=='chat_input_field' or aid.startswith('session_item_'):continue
+        stack.extend(reversed(control.GetChildren()))
+
 def authorized_session_item(root,name,limit=400):
     """Find one approved navigation row without reading any row Name/preview.
 
@@ -245,7 +284,9 @@ class Bridge:
             if p.name().lower()!='weixin.exe' or abs(p.create_time()-self.created)>.001:raise RuntimeError('微信已退出，请重新登录Example Account')
             if not self.guard or self.guard.poll() is not None:raise RuntimeError('兼容接口已停止')
             if identity or time.monotonic()-self.last_identity>10:
+                identity_started=time.perf_counter()
                 if identity_folders(p)!=[self.config['account']['binding']['account_folder']]:raise RuntimeError('当前微信身份发生变化，已暂停')
+                self.last_identity_probe_ms=round((time.perf_counter()-identity_started)*1000,2)
                 self.last_identity=time.monotonic()
         except psutil.AccessDenied as error:
             # Unreadable metadata is not evidence of logout or changed identity.
@@ -287,7 +328,7 @@ class Bridge:
         self.check(True)
         return dict(pid=self.pid,created=self.created,account=CONFIG['account']['displayName'],version='4.1.15.56')
 
-    def room(self,name):
+    def room(self,name,*,chrome_out=None):
         target=self.target(name)
         self.check()
         desktop_ready()
@@ -301,10 +342,11 @@ class Bridge:
         peer=root.AutomationId
         if not peer.startswith('ChatSingleWindow') or len(peer)<=len('ChatSingleWindow'):raise RuntimeError('缺少稳定会话标识')
         if target.get('windowBinding') and target['windowBinding']!=peer:raise RuntimeError('同名会话身份发生变化，已暂停')
-        title=unique_chrome(root,lambda x:x.AutomationId.endswith('.current_chat_name_label'),'群标题')
+        chrome=list(walk_chrome(root))
+        title=unique_in(chrome,lambda x:x.AutomationId.endswith('.current_chat_name_label'),'群标题')
         if title.Name!=name:raise RuntimeError('群标题不匹配')
         # Group kind is verified rather than accepting a same-named private contact.
-        is_group=any(x.ClassName=='mmui::ChatTitleBarChatRoomView' for x in walk_chrome(root))
+        is_group=any(x.ClassName=='mmui::ChatTitleBarChatRoomView' for x in chrome)
         if is_group!=(target['kind']=='group'):raise RuntimeError('会话类型不匹配')
         target['windowBinding']=peer
         return root,row['hwnd']
@@ -323,11 +365,17 @@ class Bridge:
         return self.read(name)
 
     def read(self,name,diagnostic=False):
-        root,hwnd=self.room(name)
+        read_started=time.perf_counter();chrome=[]
+        root,hwnd=self.room(name,chrome_out=chrome)
+        room_finished=time.perf_counter()
         advance=self.refresh_unread(name,root,hwnd)
-        if advance:root,hwnd=self.room(name)
-        messages=unique(root,lambda x:x.AutomationId=='chat_message_list','消息列表')
-        bubbles=[x for x in walk(messages) if x.AutomationId.endswith('.chat_bubble_item_view')]
+        refresh_finished=time.perf_counter()
+        if advance:
+            chrome=[]
+            root,hwnd=self.room(name,chrome_out=chrome)
+        messages=unique_in(chrome,lambda x:x.AutomationId=='chat_message_list','消息列表')
+        field=unique_in(chrome,lambda x:x.AutomationId=='chat_input_field','输入框')
+        bubbles=list(message_bubbles(messages))
         data=[]
         for bubble in bubbles[-100:]:
             row=dict(id='.'.join(map(str,bubble.GetRuntimeId())),text=bubble.Name or '',klass=bubble.ClassName,rect=rect(bubble))
@@ -335,16 +383,19 @@ class Bridge:
                 row['help']=bubble.HelpText;row['description']=str(bubble.GetPropertyValue(30159))
                 row['children']=[dict(name=x.Name,klass=x.ClassName,id=x.AutomationId,rect=rect(x)) for x in walk(bubble)]
             data.append(row)
-        field=unique(root,lambda x:x.AutomationId=='chat_input_field','输入框')
         # Operational receipt only: never record text or sender labels here.
         # A successful UIA read does not prove that hidden Qt windows are fresh.
         if not hasattr(self,'read_health'):self.read_health={}
         target_id=self.target(name)['id'];current=time.monotonic()
         previous=self.read_health.get(target_id,{})
         digest=hashlib.sha256(json.dumps([(row['id'],row['klass'],row['text']) for row in data],ensure_ascii=False).encode()).hexdigest()
+        # Idle polls only reuse unchanged rows from this bound window. Recheck
+        # account ownership before any new/updated payload crosses the native
+        # transport boundary; sends still perform their own fresh checks.
+        if previous.get('digest')!=digest:self.check(True)
         changed=current if previous.get('digest')!=digest else previous['changed']
         health={'digest':digest,'changed':changed,'saved':previous.get('saved',0)}
-        if current-health['saved']>3:
+        if current-health['saved']>3 and not getattr(self,'focus_depth',0):
             health['saved']=current
             scroll={'available':False}
             try:
@@ -352,13 +403,14 @@ class Bridge:
                 if pattern:scroll={'available':True,'verticalScrollable':pattern.VerticallyScrollable,'verticalPercent':pattern.VerticalScrollPercent,'verticalViewSize':pattern.VerticalViewSize}
             except Exception:pass
             notices=[]
-            for item in walk(root):
+            for item in walk_notices(root):
                 if item.ControlTypeName=='ButtonControl':
                     label=item.Name or ''
                     kind='new_messages' if re.fullmatch(r'\d+条新消息',label) else 'mention' if label.endswith('提到了你') else None
                     if kind:notices.append({'kind':kind,'invokeAvailable':bool(item.GetPropertyValue(30031)),'legacyAvailable':bool(item.GetPropertyValue(30090))})
             classes={kind:sum(row['klass']==kind for row in data) for kind in {row['klass'] for row in data}}
             receipt={'at':time.time(),'targetId':target_id,'pid':self.pid,'hwnd':hwnd,'windowBinding':root.AutomationId,'rowCount':len(data),'classes':classes,'summonsRows':sum(any(alias in row['text'] for alias in CONFIG.get('character',{}).get('aliases',[])) for row in data),'draftChars':len(field.GetValuePattern().Value or ''),'digest':digest,'stationarySeconds':round(current-changed,1),'minimized':bool(U.IsIconic(hwnd)),'visible':bool(U.IsWindowVisible(hwnd)),'rootHwnd':int(U.GetAncestor(hwnd,2) or 0),'scroll':scroll,'notices':notices}
+            receipt['timingMs']={'room':round((room_finished-read_started)*1000,2),'refresh':round((refresh_finished-room_finished)*1000,2),'content':round((time.perf_counter()-refresh_finished)*1000,2),'lastIdentityProbe':getattr(self,'last_identity_probe_ms',None)}
             (ROOT/'data'/('read_health_'+target_id+'.json')).write_text(json.dumps(receipt),encoding='utf-8')
         self.read_health[target_id]=health
         if not hasattr(self,'message_tracker'):self.message_tracker=NativeMessageTracker()
@@ -389,7 +441,7 @@ class Bridge:
         if before['foregroundPid']==self.pid or modifiers_down():return False
         def controls(current):
             found=[]
-            for item in walk(current):
+            for item in walk_notices(current):
                 if item.ControlTypeName!='ButtonControl':continue
                 label=item.Name or ''
                 kind='new_messages' if re.fullmatch(r'\d+条新消息',label) else 'mention' if label.endswith('提到了你') else None
@@ -423,7 +475,11 @@ class Bridge:
         after=focus_state()
         receipt={'at':time.time(),'targetId':self.target(name)['id'],'pid':self.pid,'hwnd':hwnd,'actions':actions,'mechanisms':mechanisms,'remainingNotices':remaining,'latestViewportReached':bool(actions) and not remaining,'minimizedAfter':bool(U.IsIconic(hwnd)),'foregroundBefore':before['foreground'],'foregroundAfter':after['foreground'],'focusUnchanged':before['foreground']==after['foreground'],'globalInputSent':False}
         (ROOT/'data'/('unread_refresh_'+self.target(name)['id']+'.json')).write_text(json.dumps(receipt),encoding='utf-8')
-        if not receipt['focusUnchanged']:raise RuntimeError('后台跳转时前台窗口发生变化，本次读取停止')
+        # A user may switch between unrelated apps while the verified jump is
+        # finishing. The loop already stops further actions on focus change.
+        # Do not discard its unread-count proof: the next poll would otherwise
+        # baseline the newly reached messages and silently lose the request.
+        # Reading this bound group is still allowed; sending has separate guards.
         if remaining:
             self.unread_refresh_times[name]=time.monotonic()+15
             self.unread_refresh_errors[name]='群窗口仍停在旧消息，后台跳转尚未成功；稍后自动重试'
@@ -436,7 +492,7 @@ class Bridge:
         self.check(True)
         root,hwnd=self.room(name)
         if expected_hwnd is not None and hwnd!=expected_hwnd:raise RuntimeError('会话窗口已更换，未输入')
-        field=unique(root,lambda x:x.AutomationId=='chat_input_field','输入框')
+        field=unique_chrome(root,lambda x:x.AutomationId=='chat_input_field','输入框')
         value=field.GetValuePattern()
         if value.Value:raise RuntimeError('微信输入框有手动草稿，已暂停发送')
         value.SetValue(text,waitTime=.2)
@@ -556,7 +612,7 @@ class Bridge:
             self.targets=supplied
             return self.connect()
         if command=='open':return self.open_room(request['group'],request.get('allowForeground') is True)
-        if command=='health':self.check(True);return {'healthy':True}
+        if command=='health':self.check();return {'healthy':True}
         if command=='read':return self.read(request['group'],request.get('diagnostic',False))
         if command=='probe_input':return self.probe_input(request['group'])
         if command=='send':return self.send(request['group'],request['text'])

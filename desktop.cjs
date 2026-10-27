@@ -36,7 +36,7 @@ app.whenReady().then(async()=>{
       if(win&&!win.isDestroyed())win.webContents.send('xiaoxi:state',state);
       const diagnostic=JSON.stringify([state.modelInput?.callId,state.modelInput?.stage,state.personaStatus?.sha256,state.personaStatus?.lastError?.code,state.latency?.recent.at(-1)?.requestId]);
       if(Date.now()-lastStatus>3000||diagnostic!==lastDiagnostic){lastStatus=Date.now();lastDiagnostic=diagnostic;
-        const status={at:new Date().toISOString(),pid:process.pid,appVersion,privacy:state.privacy,media:state.mediaStatus,mediaCapabilities:state.mediaCapabilities,searchEnabled:state.settings.allowSearch===true,personaVersion:core.persona.schema_version,persona:state.personaStatus,modelInput:state.modelInput,latency:state.latency,connection:state.connection,model:state.modelState.stage,targets:state.targetStates,busy:state.busy.length,inbox:state.inbox.map(({status})=>status),outbox:state.outbox.map(({status})=>status),memoryCount:state.memories.length};
+        const status={at:new Date().toISOString(),pid:process.pid,appVersion,privacy:state.privacy,media:state.mediaStatus,mediaCapabilities:state.mediaCapabilities,searchEnabled:state.settings.allowSearch===true,personaVersion:core.persona.schema_version,persona:state.personaStatus,modelInput:state.modelInput,latency:state.latency,connection:state.connection,model:state.modelState.stage,modelHealth:state.modelHealth,targets:state.targetStates,busy:state.busy.length,inbox:state.inbox.map(({status})=>status),outbox:state.outbox.map(({status})=>status),memoryCount:state.memories.length};
         fs.writeFileSync(path.join(root,'data/runtime_status.json'),JSON.stringify(status,null,2));
       }
     });
@@ -48,7 +48,7 @@ app.whenReady().then(async()=>{
     }else if(process.argv.includes('--smoke-test')){
       await core.start();
       const state=core.snapshot();
-      fs.writeFileSync(path.join(root,'data/client_smoke.json'),JSON.stringify({at:new Date().toISOString(),model:state.modelState.stage,connection:state.connection,targets:state.targetStates,secretStorage:'Windows DPAPI',automaticGroupMessagesSent:state.outbox.length},null,2));
+      fs.writeFileSync(path.join(root,'data/client_smoke.json'),JSON.stringify({at:new Date().toISOString(),model:state.modelState.stage,modelHealth:state.modelHealth,connection:state.connection,targets:state.targetStates,secretStorage:'Windows DPAPI',automaticGroupMessagesSent:state.outbox.length},null,2));
       await core.stop();app.quit();
     }else if(core.store.value.autoConnect&&!process.argv.includes('--no-connect'))void core.start();
   }catch(error){dialog.showErrorBox('小汐启动失败',error.message);app.quit();}

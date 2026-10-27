@@ -1,3 +1,10 @@
+# Install the committed fictional registry before importing production adapters.
+import pathlib as _test_pathlib
+import sys as _test_sys
+_test_sys.path.insert(0, str(_test_pathlib.Path(__file__).resolve().parent))
+from native_test_bootstrap import configure_test_environment
+configure_test_environment()
+
 import sys, pathlib, unittest
 from contextlib import contextmanager
 from unittest.mock import patch, Mock
@@ -74,6 +81,22 @@ class IdentityDiagnostics(unittest.TestCase):
         with patch.object(d.psutil,'Process',return_value=self.process()),patch.object(d.time,'monotonic',return_value=123):b.check(True)
         self.assertEqual(b.last_identity,123)
 
+    def test_idle_health_checks_process_guard_and_expiring_account_binding(self):
+        import desktop_bridge as d
+        b=self.bridge();process=self.process()
+        with patch.object(d.psutil,'Process',return_value=process),patch.object(d.time,'monotonic',return_value=8):
+            self.assertEqual(b.dispatch({'command':'health'}), {'healthy':True})
+            process.open_files.assert_not_called()
+            process.name.assert_called()
+            process.create_time.assert_called()
+            b.guard.poll.assert_called()
+        with patch.object(d.psutil,'Process',return_value=process),patch.object(d.time,'monotonic',return_value=18):
+            self.assertEqual(b.dispatch({'command':'health'}), {'healthy':True})
+            process.open_files.assert_called_once()
+        b.guard.poll.return_value=1
+        with patch.object(d.psutil,'Process',return_value=process),self.assertRaisesRegex(RuntimeError,'兼容接口已停止'):
+            b.dispatch({'command':'health'})
+
 class Guards(unittest.TestCase):
     def test_connect_scope_rejects_private_or_spoofed_target_before_native_access(self):
         b=object.__new__(Bridge)
@@ -115,10 +138,10 @@ class Guards(unittest.TestCase):
             def SetValue(self,*_):raise AssertionError('manual draft overwritten')
         class Field:
             def GetValuePattern(self):return Pattern()
-        original=desktop_bridge.unique;desktop_bridge.unique=lambda *_:Field()
+        original=desktop_bridge.unique_chrome;desktop_bridge.unique_chrome=lambda *_:Field()
         try:
             with self.assertRaisesRegex(RuntimeError,'手动草稿'):b.prepare('allowed','hello')
-        finally:desktop_bridge.unique=original
+        finally:desktop_bridge.unique_chrome=original
 
     def test_recreated_window_is_rejected_before_setting_value(self):
         b=object.__new__(Bridge);b.check=lambda *_:None;b.room=lambda *_:(object(),2)

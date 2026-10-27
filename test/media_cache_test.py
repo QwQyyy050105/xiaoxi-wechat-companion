@@ -1,3 +1,10 @@
+# Install the committed fictional registry before importing production adapters.
+import pathlib as _test_pathlib
+import sys as _test_sys
+_test_sys.path.insert(0, str(_test_pathlib.Path(__file__).resolve().parent))
+from native_test_bootstrap import configure_test_environment
+configure_test_environment()
+
 import io, pathlib, struct, sys, tempfile, unittest
 from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'scripts'))

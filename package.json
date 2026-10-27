@@ -16,12 +16,14 @@
     "native:prepare": "node scripts/cli.mjs native-prepare"
   },
   "dependencies": {
-    "electron": "45.0.0",
     "qrcode": "1.5.4",
     "json-bigint": "1.0.0"
   },
   "engines": {
     "node": ">=20.16"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "optionalDependencies": {
+    "electron": "45.0.0"
+  }
 }

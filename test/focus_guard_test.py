@@ -1,3 +1,10 @@
+# Install the committed fictional registry before importing production adapters.
+import pathlib as _test_pathlib
+import sys as _test_sys
+_test_sys.path.insert(0, str(_test_pathlib.Path(__file__).resolve().parent))
+from native_test_bootstrap import configure_test_environment
+configure_test_environment()
+
 import json
 import pathlib
 import shutil

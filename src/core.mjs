@@ -1,5 +1,6 @@
 import {deployment,loadDeployment,saveDeployment,validateAliases} from './deployment_config.mjs';
 import fs from 'node:fs';
+import {ModelHealth,ModelCallError,safeModelError,modelHealthMessage} from './model_health.mjs';
 import {validateModelSettings} from './compatible_api.mjs';
 import {UnsupportedCapability} from './extension_host.mjs';
 import path from 'node:path';
@@ -37,7 +38,7 @@ function findShort(rows,id){const matches=rows.filter(x=>x.id===id||x.id.startsW
 
 export class Companion extends EventEmitter {
   constructor({root,codec,model=generate,search=generateSearch,weather,voice=createVoiceProvider(),media=createMediaService(),groupMedia,transportFactory=()=>new DesktopTransport(root),nowMs=Date.now,extensions,stateFile}){
-    super();this.extensions=extensions;this.root=root;this.model=model;this.search=search;this.voice=voice;this.media=media;this.transportFactory=transportFactory;this.nowMs=nowMs;
+    super();this.activeModelCalls=new Set();this.modelHealth=new ModelHealth({nowMs});this.extensions=extensions;this.root=root;this.model=model;this.search=search;this.voice=voice;this.media=media;this.transportFactory=transportFactory;this.nowMs=nowMs;
     this.store=new Store(stateFile??path.join(root,'data/companion.enc'),codec);
     applyDeploymentSettings(this.store,root);
     if(this.store.value.settings.provider==='codex'&&!this.store.value.settings.model)this.store.change(s=>{s.settings.model=CODEX_CHAT_MODEL;});
@@ -51,7 +52,7 @@ export class Companion extends EventEmitter {
     this.context=new ConversationContext({nowMs});this.policy=new ReplyPolicy({nowMs,names:this.store.value.settings.aliases??deployment.character.aliases??[deployment.character.name],readOnlyIntent:text=>this.store.value.settings.allowSearch===true&&!!(parseWeatherIntent(text)||parseWebIntent(text)||planContextResearch({text})?.kind==='research')});this.turns=new Map();this.batchTimers=new Map();this.taskRunning=false;
     this.latency={poll:null,recent:[],decisions:[],coalescedSummons:0,revisedReplies:0};this.polling=false;
     this.voiceReadiness={characterId:'xiaoxi',ready:false,available:false,audioFile:false,voiceBubble:false,reason:'unchecked'};
-    this.connection={stage:'stopped',message:'尚未连接',account:deployment.account.displayName};this.modelState={stage:'unchecked',message:'等待真实调用自检'};
+    this.connection={stage:'stopped',message:'尚未连接',account:deployment.account.displayName};this.modelState={stage:'unchecked',message:'当前模型尚未核验；新问题会尝试，也可手动测试。'};
     this.store.change(s=>{const recovered=recoverInterrupted(s)+recoverTasks(s,{now:this.nowMs()}).length;if(recovered)s.events.push({time:now(),message:`恢复了 ${recovered} 个中断状态；未补发旧消息。`});});
     if(!this.store.value.sessions.some(x=>x.channel==='local'))this.store.createSession();
     this.ensureSessions();
@@ -59,7 +60,7 @@ export class Companion extends EventEmitter {
     for(const session of this.store.value.sessions){this.policy.restoreProactive(session.id,session.proactiveUsage);for(const out of this.store.value.outbox.filter(x=>x.sessionId===session.id&&x.kind==='proactive'&&['unknown','local_echo'].includes(x.status)))this.policy.recordProactive(session.id,{outboxId:out.id,status:out.status,nowMs:Date.parse(out.createdAt)});}
   }
   ensureSessions(){for(const t of filterAuthorizedWechatTargets(this.store.value.targets))if(!this.sessionFor(t.id))this.store.createSession(t.name,'desktop_wechat',deployment.account.displayName,t.id);}
-  snapshot(){return {...this.store.snapshot(),mode:this.demo?'demo':'configured',privacy:{policy:CONVERSATION_SCOPE_POLICY,authorizedWechatTargets:getAuthorizedWechatScopes()},connection:this.connection,modelState:this.modelState,targetStates:this.targetStates,extensions:this.extensions?.snapshot()??null,persona:this.persona,personaStatus:this.personaStatus,modelInput:this.modelInput,latency:structuredClone(this.latency),busy:[...this.controllers.keys()],capabilities:{text:true,webSearch:this.searchEnabled(),media:this.mediaCapabilityStatus().imageInput,voice:false,senderIdentity:false},voiceReadiness:this.voiceReadiness,mediaCapabilities:this.mediaCapabilityStatus(),mediaStatus:structuredClone(this.groupMedia.status),featureStatus:this.featureStatus(),contextStatus:Object.fromEntries(this.store.value.sessions.map(s=>{const c=this.context.snapshot(s.id);return [s.id,{count:c.messages.length,generation:c.generation,range:c.range}];}))};}
+  snapshot(){return {...this.store.snapshot(),mode:this.demo?'demo':'configured',privacy:{policy:CONVERSATION_SCOPE_POLICY,authorizedWechatTargets:getAuthorizedWechatScopes()},connection:this.connection,modelState:this.modelState,modelHealth:this.modelHealth.snapshot(),targetStates:this.targetStates,extensions:this.extensions?.snapshot()??null,persona:this.persona,personaStatus:this.personaStatus,modelInput:this.modelInput,latency:structuredClone(this.latency),busy:[...this.controllers.keys()],capabilities:{text:true,webSearch:this.searchEnabled(),media:this.mediaCapabilityStatus().imageInput,voice:false,senderIdentity:false},voiceReadiness:this.voiceReadiness,mediaCapabilities:this.mediaCapabilityStatus(),mediaStatus:structuredClone(this.groupMedia.status),featureStatus:this.featureStatus(),contextStatus:Object.fromEntries(this.store.value.sessions.map(s=>{const c=this.context.snapshot(s.id);return [s.id,{count:c.messages.length,generation:c.generation,range:c.range}];}))};}
   searchModelSettings(){
     // Explicit projection: search never receives chat history, private cards or
     // inline credentials. These are the settings the built-in Codex search uses.
@@ -101,7 +102,10 @@ export class Companion extends EventEmitter {
     const previousError=this.personaStatus?.lastError;
     const loaded=this.personaLoader.reload();this.persona=loaded.persona;this.personaStatus=loaded.status;
     if(loaded.status.lastError&&previousError?.code!==loaded.status.lastError.code)this.event('人设卡更新未通过校验，继续使用上次有效版本；请检查 character_card.json');
-    const callId=uid();
+    if(purpose!=='self_check'&&this.controllers.has('model_check'))throw new ModelCallError('model_self_check_busy');
+    if(purpose==='self_check'&&this.activeModelCalls.size)throw new ModelCallError('model_busy');
+    const healthToken=this.modelHealth.begin({force:purpose==='self_check'});
+    const callId=uid();this.activeModelCalls.add(callId);
     this.modelInput={callId,stage:'preparing',purpose,sourceSha256:loaded.status.sha256,personaVersion:this.persona.schema_version,provider:args.settings?.provider??'mock',prepared:false,startedAt:now()};
     const finish=stage=>{if(this.modelInput?.callId===callId){this.modelInput={...this.modelInput,stage,finishedAt:now()};this.update();}};
     this.update();
@@ -112,18 +116,27 @@ export class Companion extends EventEmitter {
         if(this.modelInput?.callId!==callId)return;
         this.modelInput={...this.modelInput,...diagnostics,stage:'prepared',prepared:true};this.update();
       }});
+      if(args.signal?.aborted){this.modelHealth.release(healthToken);finish('cancelled');return {text:''};}
+      this.modelHealth.success(healthToken);this.modelState={stage:'ready',message:'当前模型提供者调用已成功',checkedAt:new Date(this.nowMs()).toISOString()};
       if(this.modelInput?.callId===callId&&result.timing)this.modelInput.transportTiming=result.timing;
-      finish(args.signal?.aborted?'cancelled':'completed');return result;
-    }catch(error){finish(args.signal?.aborted?'cancelled':'failed');throw error;}
+      finish('completed');return result;
+    }catch(error){
+      const failure=safeModelError(error,{cancelled:args.signal?.aborted===true});
+      if(args.signal?.aborted)this.modelHealth.release(healthToken);
+      else {this.modelHealth.failure(healthToken,failure);const health=this.modelHealth.snapshot();this.modelState={stage:'error',message:modelHealthMessage(health),errorCode:failure.code,actionRequired:health.actionRequired};}
+      if(this.modelInput?.callId===callId)this.modelInput={...this.modelInput,errorCode:failure.code};
+      finish(args.signal?.aborted?'cancelled':'failed');throw failure;
+    }finally{this.activeModelCalls.delete(callId);this.modelHealth.release(healthToken);}
   }
   async checkModel(){
     const key='model_check';if(this.controllers.has(key))return;
+    if(this.activeModelCalls.size)throw new ModelCallError('model_busy');
     const abort=new AbortController();this.controllers.set(key,abort);this.modelState={stage:'checking',message:'正在验证 AI 实际回复'};this.update();
     try{
       const reply=await this.runModel({settings:this.store.value.settings,session:{messages:[{role:'user',text:'用一句简短的话介绍你自己。'}]},memories:[],root:this.root,signal:abort.signal},'self_check');
       if(abort.signal.aborted)return;
-      this.modelState={stage:'ready',message:reply.text,checkedAt:now()};this.event('AI 真实调用自检通过');return reply.text;
-    }catch(error){if(!abort.signal.aborted){this.modelState={stage:'error',message:error.message};this.event('AI 自检未通过：'+error.message);}throw error;}
+      this.modelState={stage:'ready',message:reply.text,checkedAt:now()};this.event('模型提供者调用自检通过；Mock 仅代表本机演示');return reply.text;
+    }catch(error){if(!abort.signal.aborted){const health=this.modelHealth.snapshot();this.modelState={stage:'error',message:modelHealthMessage(health),errorCode:error.code??'model_generation_failed',actionRequired:health.actionRequired};this.event('AI 自检未通过：'+(error.code??'model_generation_failed'));}throw error;}
     finally{this.controllers.delete(key);this.update();}
   }
   async start({acknowledgeUnknown=false}={}){
@@ -131,7 +144,9 @@ export class Companion extends EventEmitter {
     if(this.running)return;
     this.running=true;const generation=++this.generation;this.connection={stage:'connecting',account:deployment.account.displayName,message:'检查微信账号与兼容版本'};this.update();
     void this.refreshReadiness();
-    if(this.modelState.stage!=='ready'){try{await this.checkModel();}catch{}}
+    // Local platform readiness must not wait for a cloud self-check.
+    // New input verifies the configured provider; manual self-check stays explicit.
+    if(this.modelState.stage==='unchecked'){this.modelState={stage:'unchecked',message:'当前模型尚未核验；新问题到来时尝试，或手动点击测试 AI。'};this.update();}
     if(this.running&&generation===this.generation)await this.connect(true,{acknowledgeUnknown});
   }
   schedule(ms){clearTimeout(this.timer);if(this.running)this.timer=setTimeout(()=>{void this.tick();},ms);}
@@ -339,10 +354,13 @@ export class Companion extends EventEmitter {
       const from=observations.findIndex(item=>item.sourceKey===row.event.sourceKey),to=observations.findIndex(item=>item.sourceKey===event.sourceKey);
       return from>=0&&to>from&&observations.slice(from+1,to+1).every(item=>item.role==='user'&&!item.quote&&!item.attachments?.length&&isSocialSummons(item.text));
     });
-    const eligible=!coalesced&&this.modelState.stage==='ready'&&queue.length<5;
+    const availability=this.modelHealth.availability();
+    const selfChecking=this.controllers.has('model_check');
+    const modelEligible=!selfChecking&&['ready','unchecked','error'].includes(this.modelState.stage)&&availability.allowed;
+    const eligible=!coalesced&&modelEligible&&queue.length<5;
     if(coalesced)this.latency.coalescedSummons++;
     this.store.change(s=>{
-      s.inbox.push({id,key,sessionId:session.id,status:eligible?'queued':'skipped',reason:coalesced?'已有回答处理中，本次叫名合并':this.modelState.stage!=='ready'?'AI 尚未就绪':queue.length>=5?'等待队列已满':'',...(coalesced?{coalescedInto:coalesced.id}:{}),createdAt:now(),event,replyReason:message.replyReason,directReply:message.directReply,kind:message.kind||'reply'});
+      s.inbox.push({id,key,sessionId:session.id,status:eligible?'queued':'skipped',reason:coalesced?'已有回答处理中，本次叫名合并':!modelEligible?(selfChecking?'model_self_check_busy':availability.code??'AI 尚未就绪'):queue.length>=5?'等待队列已满':'',...(coalesced?{coalescedInto:coalesced.id}:{}),createdAt:now(),event,replyReason:message.replyReason,directReply:message.directReply,kind:message.kind||'reply'});
       s.sessions.find(x=>x.id===session.id).messages.push({id:uid(),role:'user',text:message.text,createdAt:now(),source:'wechat',sourceKey:event.sourceKey,sender:event.sender});
     });
     if(eligible){queue.push(id);this.pending.set(session.id,queue);
@@ -640,7 +658,8 @@ export class Companion extends EventEmitter {
     if(this.stopping)return this.stopping;
     const task=(async()=>{
       this.running=false;this.generation++;clearTimeout(this.timer);this.timer=null;
-      for(const controller of this.controllers.values())controller.abort();this.pending.clear();
+      for(const controller of this.controllers.values())controller.abort();this.modelHealth.cancelAll();this.pending.clear();
+      if(this.modelState.stage==='checking')this.modelState={stage:'unchecked',message:'模型自检已停止；尚未完成核验'};
       this.weather?.clearAll();
       this.publicLookup.clearAll();
       this.groupMedia.clear();
@@ -706,7 +725,7 @@ export class Companion extends EventEmitter {
       if(p.style!==undefined&&!['natural','concise','detailed'].includes(p.style))throw Error('style_invalid');
       await this.stop();
       this.store.change(s=>{s.settings={...settings,aliases,style:p.style??s.settings.style??'natural',apiKey:p.clearApiKey?'':p.apiKey||s.settings.apiKey||'',webSearch:false,allowSearch:p.allowSearch===true};s.autoConnect=!!p.autoConnect;});
-      this.policy.names=aliases;this.modelState={stage:'unchecked',message:'设置已保存，请测试模型'};this.update();return true;
+      this.policy.names=aliases;this.modelHealth.reset();this.modelState={stage:'unchecked',message:'设置已保存；新问题会核验当前模型，也可手动测试'};this.update();return true;
     }
     if(action==='target.save'){
       if(!p.id)p={...p,id:getAuthorizedWechatScopes().find(row=>row.name===p.name?.trim()&&row.kind===p.kind)?.id};

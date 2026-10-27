@@ -39,14 +39,14 @@ test('committed answer resolves before slow child shutdown; partial items alone 
 });
 test('truncated or failed processes do not publish an uncommitted draft',async()=>{
  for(const failure of [false,true]){
-  const {promise}=await start();const rejected=assert.rejects(promise,/本轮未完成/);
+  const {promise}=await start();const rejected=assert.rejects(promise,{code:'model_generation_failed'});
   emit({type:'item.completed',item:{type:'agent_message',text:'草稿'}});
   if(failure)emit({type:'turn.failed'});child.emit('close',0);await rejected;
  }
 });
 test('cancellation kills the owned worker and rejects its late final result',async()=>{
  const controller=new AbortController();const {promise}=await start({signal:controller.signal});
- const rejected=assert.rejects(promise,/已停止/);controller.abort();
+ const rejected=assert.rejects(promise,{code:'model_cancelled'});controller.abort();
  emit({type:'item.completed',item:{type:'agent_message',text:'迟到正文'}});emit({type:'turn.completed'});
  await rejected;assert.ok(child.killed);
 });
@@ -77,6 +77,16 @@ test('actual Codex spawn keeps user-config isolation, owner model, search and to
  emit({type:'item.completed',item:{type:'agent_message',text:'synthetic committed answer'}});emit({type:'turn.completed'});assert.equal((await promise).text,'synthetic committed answer');
 });
 test('an older CLI rejecting ignore-user-config fails without retrying a less isolated command',async()=>{
- const before=spawned.length,{promise}=await start();const rejected=assert.rejects(promise,/本轮未完成/);
+ const before=spawned.length,{promise}=await start();const rejected=assert.rejects(promise,{code:'model_configuration_error'});
  child.stderr.write('error: unexpected argument --ignore-user-config');child.emit('close',2);await rejected;await tick();assert.equal(spawned.length,before+1);assert.ok(spawned.at(-1).includes('--ignore-user-config'));
+});
+
+test('Codex network failures retain the owner model and expose only safe metadata',async()=>{
+ const {promise}=await start({settings:{provider:'codex',model:'owner-network-model'}});const rejected=assert.rejects(promise,error=>error.code==='model_network_error'&&!error.message.includes('synthetic-secret'));
+ child.stderr.write('stream disconnected before completion synthetic-secret');emit({type:'error',message:'Connection error synthetic-secret'});emit({type:'turn.failed'});await rejected;assert.equal(args[args.indexOf('--model')+1],'owner-network-model');
+});
+
+test('known authentication failure survives later network messages and the configured deadline',async()=>{
+ const {promise}=await start({settings:{provider:'codex',model:'owner-selected',timeoutMs:40}});const rejected=assert.rejects(promise,error=>error.code==='model_auth_required'&&!error.message.includes('synthetic-secret'));
+ emit({type:'error',message:'401 unauthorized synthetic-secret'});child.stderr.write('Connection error synthetic-secret');await rejected;assert.ok(child.killed);
 });
