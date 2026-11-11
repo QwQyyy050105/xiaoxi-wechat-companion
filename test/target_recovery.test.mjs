@@ -32,6 +32,22 @@ test('recovery establishes its baseline before returning so the very next new me
   assert.equal(core.store.value.outbox.length,0,'recovery itself never sends');
 });
 
+test('a readable group with an uncertain send stays readable while another window is missing', async t => {
+  const {core,target}=fixture(t,()=>snapshot(['old']));
+  core.bridge.call=async (command,fields)=>{
+    if(command==='health')return {};
+    if(command==='read'&&fields.group===target.name)return snapshot(['old','while_paused']);
+    throw Error('window missing');
+  };
+  await core.tick();
+  const view=core.snapshot();
+  assert.equal(view.targetStates[targetId].stage,'paused');
+  assert.match(view.targetStates[targetId].message,/可读取/);
+  assert.equal(view.targetStates.group_family.stage,'error');
+  assert.equal(core.store.value.inbox.length,0);
+  assert.equal(core.store.value.outbox.length,0);
+});
+
 test('failed recovery read leaves quarantine enabled',async t=>{
   const {core}=fixture(t,()=>{throw Error('read failed');});
   await assert.rejects(core.dispatch('target.acknowledge',{id:targetId}),/read failed/);

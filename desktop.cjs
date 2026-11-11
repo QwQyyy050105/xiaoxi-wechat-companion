@@ -28,6 +28,11 @@ app.whenReady().then(async()=>{
     win.webContents.session.setPermissionRequestHandler((_web,_permission,callback)=>callback(false));
     ipcMain.handle('xiaoxi:call',async(event,action,payload)=>{
       if(event.sender!==win.webContents||event.senderFrame!==win.webContents.mainFrame||event.senderFrame.url!==allowed)throw Error('无效调用来源');
+      if(action==='voice.file'){
+        if(!payload || typeof payload!=='object' || Object.keys(payload).some(key=>key!=='bytes' && key!=='language'))throw Error('invalid_request');
+        const {transcribeLocalWave}=await import('./src/local_asr.mjs');
+        return transcribeLocalWave(payload?.bytes,{language:payload?.language});
+      }
       if(typeof action!=='string'||JSON.stringify(payload??{}).length>256*1024)throw Error('请求无效');
       return core.dispatch(action,payload??{});
     });

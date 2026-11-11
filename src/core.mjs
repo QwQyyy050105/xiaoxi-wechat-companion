@@ -9,7 +9,8 @@ import {Store,uid,now} from './store.mjs';
 import {generate,generateSearch,validateEndpoint} from './model.mjs';
 import {DesktopTransport} from './desktop_transport.mjs';
 import {MessageGate,shouldReply,recoverInterrupted} from './message_gate.mjs';
-import {ConversationContext,sameVerifiedSender} from './conversation_context.mjs';
+import {ConversationContext,sameVerifiedSender,senderEvidence} from './conversation_context.mjs';
+import {completeReminderTime} from './conversational_reminder.mjs';
 import {ReplyPolicy,canMergeFragment,fragmentReadyAt,isSocialSummons,classifyAddress} from './reply_policy.mjs';
 import {parseMemoryIntent,proposeMemory,approveMemory,rejectMemory,editMemory,deleteMemory,queryMemories} from './memory_service.mjs';
 import {parseTaskIntent,createReminder,approveReminder,editReminder,cancelReminder,queryTasks,recoverTasks,claimReminder,settleReminder} from './task_service.mjs';
@@ -29,6 +30,7 @@ import {loadGroupProfile} from './group_profile.mjs';
 import {PublicLookupConversation} from './public_lookup_conversation.mjs';
 import {GroupMediaInput} from './group_media.mjs';
 import {normalizeNativeMedia} from './native_media.mjs';
+import {canTranscribeLocalWave} from './local_asr.mjs';
 import {planContextResearch,researchEvidence,PublicResearchCache} from './research_intent.mjs';
 
 const OWNER={isOwner:true};
@@ -44,6 +46,7 @@ export class Companion extends EventEmitter {
     if(this.store.value.settings.provider==='codex'&&!this.store.value.settings.model)this.store.change(s=>{s.settings.model=CODEX_CHAT_MODEL;});
     this.personaLoader=new PersonaLoader(root,{nowMs});
     const loaded=this.personaLoader.load();this.persona=loaded.persona;this.personaStatus=loaded.status;this.modelInput=null;
+    this.reminderFollowups = new Map();
     this.gate=new MessageGate();this.controllers=new Map();this.targetStates={};this.pending=new Map();this.processing=new Set();this.ownIds=new Set();this.suspended=new Set();this.generation=0;this.running=false;this.attempting=false;this.timer=null;this.stopping=null;
     this.weather=weather===undefined?createWeatherConversation({nowMs}):weather;
     this.publicLookup=new PublicLookupConversation({nowMs});
@@ -51,6 +54,7 @@ export class Companion extends EventEmitter {
     this.groupMedia=groupMedia??new GroupMediaInput({root,nowMs});
     this.context=new ConversationContext({nowMs});this.policy=new ReplyPolicy({nowMs,names:this.store.value.settings.aliases??deployment.character.aliases??[deployment.character.name],readOnlyIntent:text=>this.store.value.settings.allowSearch===true&&!!(parseWeatherIntent(text)||parseWebIntent(text)||planContextResearch({text})?.kind==='research')});this.turns=new Map();this.batchTimers=new Map();this.taskRunning=false;
     this.latency={poll:null,recent:[],decisions:[],coalescedSummons:0,revisedReplies:0};this.polling=false;
+    this.audioJobs=new Map();
     this.voiceReadiness={characterId:'xiaoxi',ready:false,available:false,audioFile:false,voiceBubble:false,reason:'unchecked'};
     this.connection={stage:'stopped',message:'尚未连接',account:deployment.account.displayName};this.modelState={stage:'unchecked',message:'当前模型尚未核验；新问题会尝试，也可手动测试。'};
     this.store.change(s=>{const recovered=recoverInterrupted(s)+recoverTasks(s,{now:this.nowMs()}).length;if(recovered)s.events.push({time:now(),message:`恢复了 ${recovered} 个中断状态；未补发旧消息。`});});
@@ -75,14 +79,14 @@ export class Companion extends EventEmitter {
     const last=this.groupMedia?.status?.last;const cacheReady=cacheConnected&&last?.ok===true&&last.count>0;
     const plugin=this.extensions?.handlers.get('model')?.call;
     const visionReady=!this.demo&&this.store.value.settings.provider!=='mock'&&(plugin?plugin.capabilities?.vision===true:this.store.value.settings.vision===true);
-    return {...registered,imageInput:registered.imageInput||cacheReady,imageUnderstanding:registered.imageUnderstanding||cacheReady&&visionReady,platformTranscript:registered.platformTranscript||connected,groupCacheConfigured:deployment.native.mediaCache===true,groupCacheCandidates:cacheReady,modelVision:visionReady,autoTranscription:false,nativeStatus:this.demo?'disabled_demo':!deployment.native.mediaCache?'not_configured':!connected?'awaiting_connection':!visionReady?'model_vision_not_enabled':last?.ok===false?'resource_unavailable':cacheReady?'experimental_verified':'awaiting_image_read'};
+    return {...registered,imageInput:registered.imageInput||cacheReady,imageUnderstanding:registered.imageUnderstanding||cacheReady&&visionReady,platformTranscript:registered.platformTranscript||connected,groupCacheConfigured:deployment.native.mediaCache===true,groupCacheCandidates:cacheReady,modelVision:visionReady,autoTranscription:!!this.extensions?.has('transport')&&registered.audioTranscription===true,localWaveFiles:canTranscribeLocalWave(),nativeStatus:this.demo?'disabled_demo':!deployment.native.mediaCache?'not_configured':!connected?'awaiting_connection':!visionReady?'model_vision_not_enabled':last?.ok===false?'resource_unavailable':cacheReady?'experimental_verified':'awaiting_image_read'};
   }
   featureStatus(){return [
  {id:1,label:'文字聊天与模型',status:'implemented',detail:'Mock 本机演示；OpenAI-compatible API；已安装且登录的 Codex CLI。自选模型，不自动换模型'},
  {id:2,label:'群聊与后台收发',status:deployment.native.enabled?'experimental':'unsupported',detail:'Windows 微信 4.1.15.56 精确构建实验适配；独立群窗口，账号/群名/版本核验失败即停止；其他版本不猜偏移'},
  {id:3,label:'上下文与记忆',status:'implemented',detail:'同会话上下文、连续接话、停止/等待/换话题；长期记忆由本机主人确认'},
  {id:4,label:'图片',status:deployment.native.mediaCache?'experimental':'unsupported',detail:'缓存需明确配置账号目录与 wechatPeerId；图片与具体消息/发言者未可靠绑定，不将缓存时间当发送顺序'},
- {id:5,label:'语音输入',status:'partially_implemented',detail:'可处理微信已有的转文字；自动点击转写、原始音频提取尚不支持。媒体/ASR 可用本机插件接入'},
+ {id:5,label:'语音输入',status:'partially_implemented',detail:'可读取微信自动或手动生成的转写。本地试聊可选择 WAV 转写；传输插件也可提供绑定音频。'},
  {id:6,label:'联网',status:this.store.value.settings.allowSearch?'implemented':'disabled',detail:'默认关闭。Codex 搜索需真实查询记录和来源；API 模型需另装 search 插件才支持资料搜索'},
  {id:7,label:'声音/表情/其他平台',status:'unsupported',detail:'内置不发送音频或表情。TTS/媒体/传输插件有明确接口，未配置就返回 unsupported'},
  {id:8,label:'提醒与恢复',status:'implemented',detail:'本机确认后发送；取消/过期/未确认不会重复提交，关机期间不运行'},
@@ -188,8 +192,12 @@ export class Companion extends EventEmitter {
           this.targetStates[target.id]={...this.targetStates[target.id],stage:observed.gap?'gap':'listening',message:observed.gap?'可见消息不连续，已重新建立基线，未补发':snapshot.draft?'监听中；有手动草稿，发送将暂停':'监听中',lastRead:now()};
           const deferred=this.store.value.outbox.find(x=>x.sessionId===this.sessionFor(target.id)?.id&&x.status==='deferred');
           if(deferred){this.targetStates[target.id].stage='waiting_send';this.targetStates[target.id].message=deferred.note;}
-          if(this.suspended.has(target.id)){this.targetStates[target.id].stage='error';this.targetStates[target.id].message='上次发送结果未确认；请核对微信群里的消息和草稿，在会话管理恢复本群';}
-          else for(const message of observed.messages){
+          if (this.suspended.has(target.id)) {
+            this.targetStates[target.id].stage = 'paused';
+            this.targetStates[target.id].message = '本群可读取。上次发送结果待核对，核对消息与草稿后点“已核对微信，恢复本群”';
+            continue;
+          }
+          for(const message of observed.messages){
             const ownText=this.store.value.outbox.some(x=>x.sessionId===this.sessionFor(target.id)?.id&&x.text===message.text&&Date.now()-Date.parse(x.createdAt)<180000);
             if(!this.ownIds.has(message.id)&&!ownText)this.ingest(target,message,snapshot);
           }
@@ -209,7 +217,9 @@ export class Companion extends EventEmitter {
     }
   }
   invalidateSession(sessionId,reason,{clearContext=false,currentOnly=false,proactiveOnly=false}={}){
+    if (clearContext || !proactiveOnly) this.reminderFollowups.delete(sessionId);
     if(!sessionId)return;
+    if(!proactiveOnly)for(const job of this.audioJobs.values())if(job.sessionId===sessionId)job.controller.abort();
     if(!proactiveOnly){this.weather?.clear(sessionId);this.publicLookup.clear(sessionId);this.groupMedia.clear(sessionId);}
     const turn=this.turns.get(sessionId);
     const active=this.controllers.has(sessionId)||this.processing.has(sessionId);
@@ -259,8 +269,40 @@ export class Companion extends EventEmitter {
     if(!isAuthorizedWechatTarget(target))return;
     const session=this.sessionFor(target.id);if(!session)return;
     message=normalizeNativeMedia(message);
-    if(message.inputModality?.kind==='voice_pending')return;
-    const isText=message.klass==='mmui::ChatTextItemView'||message.inputModality?.kind==='platform_transcript';
+    if(message.inputModality?.kind==='voice_pending'){
+      this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'waiting_transcript',at:now()}};
+      void this.transcribeIncomingVoice(target,session,message,snapshot);
+      return;
+    }
+    if(message.inputModality?.kind==='platform_transcript'){
+      this.audioJobs.get(JSON.stringify([session.id,message.id]))?.controller.abort();
+      message={...message,key:'voice/'+message.id};
+      this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'platform_transcript',at:now()}};
+    }
+    this.ingestContent(target,session,message,snapshot);
+  }
+  async transcribeIncomingVoice(target,session,message,snapshot){
+    const audio=message.attachments?.filter(a=>a.kind==='audio'&&a.available===true);
+    if(!this.running||this.demo||!target.enabled||target.paused||target.mode==='observe'||this.suspended.has(target.id)||
+       !this.extensions?.has('transport')||!this.media.capabilities().audioTranscription||audio?.length!==1)return;
+    const key=JSON.stringify([session.id,message.id]);
+    if(this.audioJobs.has(key)||this.audioJobs.size>=4)return;
+    const controller=new AbortController(), generation=this.generation, scope=this.context.generation(session.id);
+    const current=()=>this.running&&this.generation===generation&&!controller.signal.aborted&&this.context.generation(session.id)===scope&&
+      this.scopedTargetSession(target,session.id)&&!this.suspended.has(target.id)&&this.store.value.targets.some(t=>t.id===target.id&&t.enabled&&!t.paused&&t.mode!=='observe');
+    this.audioJobs.set(key,{controller,sessionId:session.id});
+    try{
+      const result=await this.media.analyze({kind:'audio',sessionId:session.id,messageId:message.id,handle:audio[0].resourceId},{signal:controller.signal,requiredSource:'wechat_attachment'});
+      if(!current())return;
+      if(!result.ok||result.text.length>6000){this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'audio_unavailable',at:now()}};return;}
+      this.ingestContent(target,session,{...message,key:'voice/'+message.id,text:result.text,inputModality:{kind:'asr_transcript',provenance:'bound_audio',uncertain:result.uncertain}},snapshot);
+      this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'asr_transcript',at:now()}};
+    }catch{
+      if(current())this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'audio_unavailable',at:now()}};
+    }finally{this.audioJobs.delete(key);}
+  }
+  ingestContent(target,session,message,snapshot){
+    const isText=message.klass==='mmui::ChatTextItemView'||['platform_transcript','asr_transcript'].includes(message.inputModality?.kind);
     const event=this.context.observe(session.id,{...message,role:'user',sourceKey:`${snapshot.created}/${snapshot.hwnd}/${target.id}/${message.key||message.id}`,receivedAt:this.nowMs(),sender:message.sender||{evidence:'unknown'},attachments:message.attachments||[]});
     if(!event||!isText||!event.text.trim()||event.text.length>6000)return;
     const previousEngagement=this.policy.state(session.id).engagement;
@@ -396,12 +438,13 @@ export class Companion extends EventEmitter {
       if(!reply||!this.validTurn(sessionId,turn)){this.store.change(s=>{for(const i of s.inbox.filter(x=>ids.includes(x.id)&&x.status==='generating')){i.status='skipped';i.reason=reply?'本轮已取消':'本轮保持安静';}});return;}
       const plan=planTextReply(reply,{splitReplies:currentTarget?.preferences?.splitReplies===true});
       turn.deliveryStarted=true;
+      turn.sendTiming = {attempts:0, deferred:0, bridgeMs:0, waitMs:0};
       let finalStatus='completed';
       for(const part of plan.parts){
         if(!this.validTurn(sessionId,turn)){finalStatus='skipped';break;}
         const out={id:uid(),sessionId,epoch:turn.epoch,contextGeneration:turn.contextGeneration,text:part.text,createdAt:now(),status:'prepared',kind:turn.kind,requestIds:ids,part:part.index};
         this.store.change(s=>s.outbox.push(out));
-        const result=await this.deliver(target,out,generation,{signal:controller.signal});
+        const result=await this.deliver(target,out,generation,{signal:controller.signal,sendTiming:turn.sendTiming});
         if(!result||!this.running||generation!==this.generation)return;
         this.recordDelivery(target,sessionId,out,result,item.event);
         if(result.status!=='local_echo'){finalStatus=result.status==='unknown'?'uncertain':'error';break;}
@@ -412,6 +455,7 @@ export class Companion extends EventEmitter {
       const finished=performance.now();
       const timing={at:now(),requestId:item.id,sessionId,responsePath:item.directReply?(item.replyReason==='social_summons'?'presence':'clarification'):(turn.responsePath||'model_or_service'),queueMs:Math.round(turn.queueMs),answerMs:Math.round((turn.answerReadyAt??finished)-turn.startedAt),deliveryMs:turn.answerReadyAt===undefined?0:Math.round(finished-turn.answerReadyAt),totalAfterObservationMs:Math.round(turn.queueMs+finished-turn.startedAt),linkedPreviousQuestion:!!item.event.replyContext,engagedFollowup:item.event.engagement?.relation==='current_group_topic',status:this.store.value.inbox.find(row=>row.id===item.id)?.status??'unknown'};
       if(turn.researchTiming)timing.research={...turn.researchTiming};
+      if(turn.sendTiming)timing.send={...turn.sendTiming};
       this.latency.recent.push(timing);this.latency.recent=this.latency.recent.slice(-20);
       if(this.controllers.get(sessionId)===controller)this.controllers.delete(sessionId);
       if(this.turns.get(sessionId)===turn)this.turns.delete(sessionId);
@@ -446,7 +490,7 @@ export class Companion extends EventEmitter {
     if(result.status==='unknown'){this.suspended.add(target.id);this.invalidateSession(sessionId,'发送结果未确认');this.event(`${target.name}：${result.note}；已暂停该会话回复`);}
     else if(result.status==='not_sent')this.event(`${target.name}：本条未发送，${result.note}`);
   }
-  async deliver(target,out,generation,{retryMs=3000,maxWaitMs=180000,signal}={}){
+  async deliver(target,out,generation,{retryMs=3000,maxWaitMs=180000,signal,sendTiming}={}){
     assertAuthorizedWechatTarget(target);assertConversationScope(this.store.session(out.sessionId),this.store.value.targets);
     if(!this.scopedTargetSession(target,out.sessionId))return {status:'not_sent',note:'会话授权或目标映射已变化，本条取消',ids:[]};
     const deadline=Date.now()+maxWaitMs;
@@ -460,23 +504,27 @@ export class Companion extends EventEmitter {
       this.store.change(s=>Object.assign(s.outbox.find(x=>x.id===out.id),{status:'sending'}));
       let result;
       const beforeSubmit=()=>this.running&&generation===this.generation&&!signal?.aborted&&Date.now()<deadline&&this.scopedTargetSession(target,out.sessionId)&&(out.epoch===undefined||this.store.session(out.sessionId)?.epoch===out.epoch)&&(out.contextGeneration===undefined||this.context.generation(out.sessionId)===out.contextGeneration)&&!this.suspended.has(target.id)&&!this.store.value.targets.find(t=>t.id===target.id)?.paused;
+      const attemptStarted = performance.now();
       try{result=await this.bridge.call('send',{group:target.name,text:out.text},20000,{signal,beforeSubmit});}
       catch(error){result={status:error.sendNotSubmitted?'not_sent':'unknown',note:error.message,ids:[]};}
+      if(sendTiming){sendTiming.attempts++;sendTiming.bridgeMs+=Math.round(performance.now()-attemptStarted);}
       if(!this.running||generation!==this.generation)return null;
       if(!result||typeof result!=='object'||!['local_echo','unknown','not_sent','deferred'].includes(result.status))return {status:'unknown',note:'接口返回未识别的发送状态',ids:[]};
       if(result.status!=='deferred')return result;
+      if(sendTiming)sendTiming.deferred++;
       // A deferred result has submitted no send event. Any exact bot-owned
       // temporary draft has been cleared; only this state may be retried.
       if(Date.now()>=deadline)return {status:'not_sent',note:'等待手动操作结束已超过三分钟，本条取消',ids:[]};
       this.store.change(s=>Object.assign(s.outbox.find(x=>x.id===out.id),{status:'deferred',note:result.note}));
       this.targetStates[target.id]={...this.targetStates[target.id],stage:'waiting_send',message:result.note};this.update();
       // Short slices let Stop/reconnect finish promptly, without any old send.
-      const resume=Date.now()+retryMs;
+      const waitStarted=performance.now(),resume=Date.now()+retryMs;
       while(this.running&&generation===this.generation&&!signal?.aborted&&Date.now()<resume)await new Promise(resolve=>setTimeout(resolve,Math.min(100,resume-Date.now())));
+      if(sendTiming)sendTiming.waitMs+=Math.round(performance.now()-waitStarted);
     }
     return null;
   }
-  async serviceReply(sessionId,request,{signal,target,owner=false}={}){
+  async serviceReply(sessionId,request,{signal,target,owner=false,reminderIntent}={}){
     assertConversationScope(this.store.session(sessionId),this.store.value.targets,{allowLocalOwner:owner});
     if(target&&!this.scopedTargetSession(target,sessionId))throw Error('会话与授权目标不一致');
     const session=this.store.session(sessionId);const text=request?.text||'';const body=classifyAddress(text,this.policy.names).text;
@@ -498,9 +546,16 @@ export class Companion extends EventEmitter {
       this.update();
       return owner?'记忆操作已保存。':'已提交给主人确认；确认前还不算长期记住。';
     }
-    const taskIntent=parseTaskIntent(body,{now:this.nowMs(),timeZone:'Asia/Shanghai'});
+    const taskIntent=reminderIntent ?? parseTaskIntent(body,{now:this.nowMs(),timeZone:'Asia/Shanghai'});
     if(taskIntent){
-      if(taskIntent.type==='clarify')return taskIntent.message;
+      if (taskIntent.type==='clarify') {
+        if (taskIntent.draft && senderEvidence(request.sender).evidence === 'stable_id') {
+          this.reminderFollowups.set(sessionId,{draft:taskIntent.draft,sender:request.sender,at:this.nowMs()});
+        } else if (taskIntent.draft) {
+          return `${taskIntent.message} 把“${taskIntent.draft.text}”和时间放在同一句，我就能记到本群`;
+        }
+        return taskIntent.message;
+      }
       if(taskIntent.type==='list'){const tasks=queryTasks(this.store.value,{sessionId}).filter(x=>!['cancelled','not_sent'].includes(x.status));return tasks.length?tasks.slice(-10).map(x=>`${x.id.slice(0,8)}：${x.dueAt} ${x.text}（${x.status}）`).join('\n'):'这个会话还没有提醒。';}
       if(taskIntent.type==='cancel'){
         if(!owner)return '取消提醒需要在本机客户端由主人确认；群里自称身份不能代替确认。';
@@ -509,7 +564,13 @@ export class Companion extends EventEmitter {
       if(taskIntent.type==='reminder'){
         if(!target)return '请在客户端“任务与提醒”选择微信会话，再创建提醒。';
         let result;this.store.change(s=>{result=createReminder(s,{...taskIntent,sessionId,targetId:target.id,actor:owner?OWNER:{},source:{eventId:request.sourceKey},requestId:request.sourceKey,expectedEpoch:session.epoch,now:this.nowMs()});});this.update();
-        return result.ok?`${owner?'提醒已保存':'提醒已提交给主人确认，尚未启用'}：${taskIntent.dueAt}，${taskIntent.text}。`:reasonText[result.code]||`提醒未建立：${result.code}`;
+        if (!result.ok) return reasonText[result.code] || `提醒未建立：${result.code}`;
+        const when = new Intl.DateTimeFormat('zh-CN', {
+          timeZone:taskIntent.timeZone, year:'numeric', month:'long', day:'numeric',
+          hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23',
+        }).format(new Date(taskIntent.dueAt)).replace(/:00$/u, '');
+        return owner ? `记好了，北京时间 ${when} 提醒本群：${taskIntent.text}`
+          : `北京时间 ${when}，提醒本群「${taskIntent.text}」。等主人在面板确认就生效`;
       }
       if(taskIntent.type==='search'){
         if(!this.store.value.settings.allowSearch)return '联网查询尚未启用。主人可在客户端“模型与启动”开启；我不会把离线回答说成刚查到的资料。';
@@ -539,7 +600,19 @@ export class Companion extends EventEmitter {
       const currentRequest=request||{text:session.messages.filter(x=>x.role==='user').at(-1)?.text||'',sourceKey:uid(),sender:{evidence:'unknown'}};
       const body=classifyAddress(currentRequest.text,this.policy.names).text;
       const engaged=currentRequest.engagement?.relation==='current_group_topic';
-      const intent=parseTaskIntent(body);
+      const intent=parseTaskIntent(body,{now:this.nowMs()});
+      const waiting = this.reminderFollowups.get(sessionId);
+      const age = waiting && this.nowMs() - waiting.at;
+      const fromAuthor = waiting && sameVerifiedSender(waiting,currentRequest);
+      if (waiting && (fromAuthor || age < 0 || age > 120000)) this.reminderFollowups.delete(sessionId);
+      if (!['continued','proactive'].includes(kind) && !currentRequest.quote && !currentRequest.textTruncated && !currentRequest.attachments?.length) {
+        const followup = fromAuthor && age >= 0 && age <= 120000
+          ? completeReminderTime(waiting.draft,body,waiting.at) : null;
+        if (followup || (!engaged && ['reminder','clarify'].includes(intent?.type))) {
+          if (turn) turn.responsePath = (followup || intent).type === 'reminder' ? 'reminder' : 'reminder_clarification';
+          return await this.serviceReply(sessionId,currentRequest,{signal:abort.signal,target,owner:session.channel==='local',reminderIntent:followup||intent});
+        }
+      }
       const mediaIntent=classifyMediaRequest(body);
       const mediaInput=kind!=='proactive'&&this.mediaCapabilityStatus().modelVision&&this.groupMedia.wants(session,currentRequest)?await this.groupMedia.prepare({session,request:currentRequest,connection:this.connection,signal:abort.signal}):null;
       let research=null;
@@ -665,6 +738,7 @@ export class Companion extends EventEmitter {
     if(this.stopping)return this.stopping;
     const task=(async()=>{
       this.running=false;this.generation++;clearTimeout(this.timer);this.timer=null;
+      for(const job of this.audioJobs.values())job.controller.abort();
       for(const controller of this.controllers.values())controller.abort();this.modelHealth.cancelAll();this.pending.clear();
       if(this.modelState.stage==='checking')this.modelState={stage:'unchecked',message:'模型自检已停止；尚未完成核验'};
       this.weather?.clearAll();

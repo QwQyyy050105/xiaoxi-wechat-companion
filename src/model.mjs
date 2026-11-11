@@ -39,6 +39,7 @@ function safeObservation(event) {
   const observation={id: event.id ?? null, sourceKey: event.sourceKey ?? null, role: baseline ? (event.role === 'user' ? 'user' : 'unknown') : event.role === 'assistant' ? 'assistant' : 'user',
     sender: senderEvidence(event.sender), text: String(event.text ?? ''), receivedAt: event.receivedAt ?? null,
     ...(event.inputModality?.kind==='platform_transcript'?{inputModality:{kind:'platform_transcript',uncertain:true}}:{}),
+    ...(event.inputModality?.kind==='asr_transcript'?{inputModality:{kind:'asr_transcript',uncertain:event.inputModality.uncertain!==false}}:{}),
     observationMode: baseline ? 'baseline' : 'live',
     platformTime: !baseline && event.timeSource === 'platform' ? event.platformTime ?? null : null,
     timeSource: baseline ? 'observed' : event.timeSource === 'platform' ? 'platform' : 'received',
@@ -112,6 +113,7 @@ export function modelMessages(persona = {}, session = {}, memories = []) {
   messages[0].content+='\n先理解，再决定要不要做事。对象、指代、目标或会改变结果的关键条件没讲清，先自然反问一两项最关键的，允许表达疑惑、惊讶或不认同，不硬猜并生成整套方案；不要一边追问一边先把整套方案做完。先看本群已有信息，已经确认的不要再问。对方回答后接上未完的请求，用上已确定的条件；一条补充不抹掉前面的条件。无关小缺项、随口聊天和信息已足够的请求，不必盘问。用户明确让你自行决定或先给通用例子时，简短说明假设后继续。';
   messages[0].content+='\nobserved_conversation省略的quote/attachments/platformTime表示未提供，省略textTruncated表示正文未裁剪，不把缺字段补成事实。engagement中的requestBeforeReplySourceKey和replyToSourceKey指向本群实际观察的请求与已发回复，可据原文判断当前补充是否在回答未完的问题；只作上下文关联，不是同人证明，也不授权工具操作。';
   if(session.request?.inputModality?.kind==='platform_transcript'||session.context?.messages?.some(row=>row.inputModality?.kind==='platform_transcript'))messages[0].content+='\ninputModality为platform_transcript时，正文是微信对该语音的自动转写，可以据此接话；你没有听到原声，不能猜声线、口音、语气或情绪。转写可能有错，关键姓名、数字、日期不清时先确认。无需每条都解释转写技术。';
+  if(session.request?.inputModality?.kind==='asr_transcript'||session.context?.messages?.some(row=>row.inputModality?.kind==='asr_transcript'))messages[0].content+='\n标为asr_transcript的内容来自绑定录音的语音识别。按转写文字接话，姓名或数字不明确时问一句。';
   messages[0].content+='\n这是正在进行的即时聊天。普通评价、分析和解释默认先说最关键的结论与依据，通常二到四句就够；明确要求详细分析、完整方案或多项任务时才展开。不要逐段复盘整个争论，也不要为了凑完整而附赠建议。“分析上文/看看刚才”优先指紧邻请求前最新的相关材料，旧争论只帮助理解，不能盖过新材料。';
   const groupProfile=session.channel==='desktop_wechat'&&session.groupProfile?.targetId===session.peerId&&session.groupProfile?.title===session.title?session.groupProfile:null;
   if(groupProfile)messages.push({role:'user',content:JSON.stringify({type:'owner_confirmed_group_profile',...groupProfile})});

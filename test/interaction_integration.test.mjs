@@ -534,6 +534,73 @@ test('group memory request needs owner approval, and edited/deleted facts cancel
   assert.equal(f.sent.length,1);assert.equal(f.core.store.value.memories[0].status,'deleted');
 });
 
+const reminderExamples = [
+  ['minutes', '十分钟后提醒我关火', '2026-10-24T17:10:00+08:00', '关火'],
+  ['weekend', '下周一早上八点提醒大家开会', '2026-10-26T08:00:00+08:00', '开会'],
+  ['tomorrow', '提醒我明天下午三点半买牛奶', '2026-10-25T15:30:00+08:00', '买牛奶'],
+  ['day-after', '后天09:15提醒我寄快递', '2026-10-26T09:15:00+08:00', '寄快递'],
+  ['evening', '今晚八点一刻提醒本群取蛋糕', '2026-10-24T20:15:00+08:00', '取蛋糕'],
+];
+for (const [id, input, expected, note] of reminderExamples) {
+  test('spoken reminder enters the chat and delivery path: ' + id, async t => {
+    const f = fixture(t, {model: async () => {throw Error('unexpected model');}});
+    f.ingest(id, '小汐，' + input);
+    await waitFor(() => !f.core.processing.size && f.sent.length === 1);
+    const task = f.core.store.value.tasks[0];
+    assert.ok(task, 'the conversation created a task');
+    const timing=f.core.latency.recent.at(-1);
+    assert.equal(timing.responsePath,'reminder');
+    assert.equal(timing.send.attempts,1);
+    assert.equal(timing.send.deferred,0);
+    assert.equal(task.dueAt, expected);
+    assert.equal(task.text, note);
+    assert.equal(task.status, 'proposed');
+    await f.core.dispatch('task.approve', {id:task.id});
+    f.clock.value = Date.parse(expected);
+    await f.core.runTasks();
+    await f.core.runTasks();
+    assert.deepEqual(f.sent.slice(1).map(message => message.text), ['提醒：' + note]);
+    assert.equal(f.sent[1].group, f.target().name);
+  });
+}
+for (const query of ['明天三点提醒我买菜', '明晚提醒我买菜', '今天上午八点提醒我买菜']) {
+  test('uncertain or past time asks again without scheduling: ' + query, async t => {
+    const f = fixture(t);
+    f.ingest('unclear', '小汐，' + query);
+    await waitFor(() => !f.core.processing.size && f.sent.length === 1);
+    assert.match(f.sent[0].text, /上午还是下午|几点|过了/u);
+    assert.equal(f.core.store.value.tasks.length, 0);
+  });
+}
+
+test('a member can finish a reminder after midnight with a short clock answer', async t => {
+  const f = fixture(t);
+  f.clock.value = Date.parse('2026-10-24T23:59:30+08:00');
+  const sender = {id:'sample-a',evidence:'stable_id'};
+  const sessionId = f.core.sessionFor('group_abao').id;
+  const reply = (text,key) => f.core.reply(sessionId,{target:f.target(),request:{text,sourceKey:key,sender}});
+  assert.match(await reply('小汐，明天提醒我开会','question'), /几点/);
+  f.clock.value += 60000;
+  assert.match(await reply('上午九点半','time'), /开会/);
+  assert.equal(f.core.store.value.tasks[0].dueAt, '2026-10-25T09:30:00+08:00');
+});
+test('a different speaker cannot set the time on another member’s draft', async t => {
+  const f = fixture(t);
+  const sessionId = f.core.sessionFor('group_abao').id;
+  const reply = (id,text) => f.core.reply(sessionId,{target:f.target(),request:{text,sourceKey:id,sender:{id,evidence:'stable_id'}}});
+  await reply('sample-a','小汐，明天提醒我开会');
+  await reply('sample-b','上午九点半');
+  assert.equal(f.core.store.value.tasks.length,0);
+  assert.match(await reply('sample-a','下午三点半'),/开会/);
+  assert.match(f.core.store.value.tasks[0].dueAt,/T15:30:00/);
+});
+test('a request to remember to check the weather is scheduled without doing a weather lookup', async t => {
+  const f = fixture(t,{search: async () => {throw Error('unexpected search');}});
+  f.ingest('check-weather','小汐，十分钟后提醒我查一下天气');
+  await waitFor(() => !f.core.processing.size && f.sent.length === 1);
+  assert.equal(f.core.store.value.tasks[0].text,'查一下天气');
+});
+
 async function savedTask(f,{approve=true}={}) {
   const created=await f.core.dispatch('task.save',{targetId:'group_abao',text:'讨论方案',dueAt:'2026-10-24T17:01:00+08:00',timeZone:'Asia/Shanghai'});
   assert.equal(created.task.status,'proposed');

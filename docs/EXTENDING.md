@@ -1,5 +1,7 @@
 # Local extensions and owner API (v1)
 
+自动处理已绑定的群语音、安装可选本地普通话识别和测试选定 WAV，见 [语音输入指南](VOICE_INPUT.md)。
+
 Plugins are trusted local ES modules. The host loads only owner-configured `./plugins/*.mjs` paths after realpath checks; chat, API payloads and persona cards cannot install modules. Never enable code you do not trust. `setup` receives no secret store; its process still has normal Node permissions, so this is not an adversarial sandbox.
 
 ```js

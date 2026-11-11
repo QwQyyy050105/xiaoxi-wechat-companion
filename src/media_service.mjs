@@ -31,8 +31,8 @@ function hasMagic(bytes, mime) {
  * evidence. Providers receive actual bounded bytes and a cancellation signal.
  * Their output is untrusted quoted content, never a command or memory mutation.
  */
-export function createMediaService({ resolveAttachment, vision, asr, timeoutMs = 5000 } = {}) {
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000 ||
+export function createMediaService({ resolveAttachment, vision, asr, timeoutMs = 5000, audioTimeoutMs = timeoutMs } = {}) {
+  if (![timeoutMs, audioTimeoutMs].every(ms => Number.isInteger(ms) && ms >= 1 && ms <= 30000) ||
       [resolveAttachment, vision, asr].some(value => value !== undefined && typeof value !== 'function')) {
     throw new TypeError('invalid media service options');
   }
@@ -41,7 +41,7 @@ export function createMediaService({ resolveAttachment, vision, asr, timeoutMs =
     imageUnderstanding: Boolean(resolveAttachment && vision), audioTranscription: Boolean(resolveAttachment && asr),
     platformTranscript: Boolean(resolveAttachment), audioFile: false, voiceBubble: false,
   });
-  async function analyze(input, { signal } = {}) {
+  async function analyze(input, { signal, requiredSource } = {}) {
     const { sessionId, messageId, handle, kind } = input ?? {};
     if (!['image', 'audio'].includes(kind) || !ID(sessionId) || !ID(messageId) || !HANDLE(handle)) {
       return unsupported(kind, 'attachment_reference_invalid');
@@ -54,14 +54,14 @@ export function createMediaService({ resolveAttachment, vision, asr, timeoutMs =
     const stop = reason => { controller.abort(reason); rejectStop(new Error(reason)); };
     const onAbort = () => stop('cancelled');
     signal?.addEventListener('abort', onAbort, { once: true });
-    timer = setTimeout(() => stop('media_timeout'), timeoutMs);
+    timer = setTimeout(() => stop('media_timeout'), kind === 'audio' ? audioTimeoutMs : timeoutMs);
     const work = async () => {
       const asset = await resolveAttachment({ sessionId, messageId, handle, kind, signal: controller.signal });
       checkAbort(controller.signal);
       if (!asset || asset.sessionId !== sessionId || asset.messageId !== messageId || asset.handle !== handle) {
         return unsupported(kind, 'attachment_scope_mismatch');
       }
-      if (!SOURCES.has(asset.source)) return unsupported(kind, 'attachment_source_untrusted');
+      if (!SOURCES.has(asset.source) || (requiredSource && requiredSource !== asset.source)) return unsupported(kind, 'attachment_source_untrusted');
       if (kind === 'audio' && asset.source === 'platform_transcript') {
         const transcript = asset.transcript;
         if (transcript?.reliable !== true || transcript.provenance !== 'platform' ||

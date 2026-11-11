@@ -15,6 +15,36 @@ for(const n of document.querySelectorAll('nav button'))n.onclick=()=>page(n.data
 $('connect').onclick=handle(async()=>{if(state.connection.stage!=='stopped')await call('stop');await call('start');});
 $('stop').onclick=handle(()=>call('stop'));
 $('test-model').onclick=handle(()=>call('model.check'));
+const speechErrors={
+  windows_speech_required:'普通话可安装本机 Vosk 模型，其他所列语言需要 Windows 语音识别器。',vosk_install_incomplete:'请检查本机 Vosk 模型和 Python 解释器路径。',speech_language_unavailable:'请安装所选语言的 Windows 语音识别组件，或选择已安装的语言。',
+  speech_worker_failed:'本机语音识别器未能完成转写。',speech_no_words:'没有识别出文字，请检查录音是否清晰。',
+  wave_size_invalid:'请选择 8 MiB 以内的 WAV 录音。',wave_duration_invalid:'录音需要有声音数据且不超过两分钟。',
+  speech_busy:'已有录音在识别，请稍后再试。',speech_timeout:'本次识别超时，可以选择更短的片段。',
+  wave_invalid:'WAV 文件不完整或格式不正确。',wave_pcm16_required:'请选择 PCM 16 位 WAV 格式。',wave_format_invalid:'需要 8–48 kHz 的单声道或双声道 PCM 16 位 WAV。'
+};
+$('voice-file-form').onsubmit=handle(async()=>{
+  const file=$('voice-file').files[0];
+  if(!file)return;
+  const status=$('voice-file-status');
+  if(!file.size||file.size>8*1024*1024){status.textContent=speechErrors.wave_size_invalid;return;}
+  $('voice-recognize').disabled=true;
+  status.textContent='正在本机识别…';
+  try {
+    const result=await window.xiaoxi.call('voice.file',{bytes:new Uint8Array(await file.arrayBuffer()),language:$('voice-language').value});
+    $('voice-draft').value=result.text;
+    status.textContent=result.engine+' · '+(result.confidence<0.85?'识别把握较低，请核对文字。':'识别完成，可核对后插入草稿。');
+  }catch(error){
+    const code=Object.keys(speechErrors).find(key=>error.message.includes(key));
+    status.textContent=speechErrors[code]||'未能识别录音，请检查 Windows 语音识别组件。';
+  }finally{$('voice-recognize').disabled=false;}
+});
+$('voice-use').onclick=()=>{
+  const text=$('voice-draft').value.trim(), draft=$('chat-text');
+  if(!text)return;
+  const combined=[draft.value,text].filter(Boolean).join('\n');
+  if(combined.length>draft.maxLength){$('voice-file-status').textContent='超过试聊字数上限，请先缩短文字。';return;}
+  draft.value=combined;draft.focus();
+};
 function syncModelPolicy(){$('model').readOnly=false;}
 $('provider').onchange=syncModelPolicy;
 function clearTarget(){$('target-form').reset();$('target-id').value='';$('target-heading').textContent='配置已授权会话';}
@@ -80,7 +110,9 @@ function renderCapabilities(s){
   if(!features.length)list.append(el('p','功能状态尚未加载；不视为已通过验收。','muted'));
   for(const feature of features){const row=el('div',undefined,'row');const title=el('div',undefined,'row-title');title.append(el('b',feature.label),el('span',featureStages[feature.status]||feature.status||'待核对','tag'));row.append(title,el('p',feature.detail||''));list.append(row);}
   const media=s.mediaCapabilities||{};const voice=s.voiceReadiness||{};
-  $('media-status').textContent=media.groupCacheCandidates?(media.imageUnderstanding?'图片：实验缓存通道已连接，最多2张候选图；未绑定发言者。':'图片缓存已连接，但所选模型尚未确认支持看图。'):media.groupCacheConfigured?({awaiting_connection:'图片缓存已配置，等待授权微信连接；当前未取得图片。',model_vision_not_enabled:'图片缓存已配置，但所选模型尚未确认支持图片输入。',resource_unavailable:'图片资源读取失败；查看运行记录中的原因，当前不能看图。',awaiting_image_read:'图片缓存已配置并连接，尚未实际取得图片；需要一次读图请求验证。'}[media.nativeStatus]||'图片资源通道尚未就绪。'):'图片缓存未配置，当前没有原生图片输入。语音只处理已取得的微信转文字；原声识别未接通。';
+  $('media-status').textContent=media.groupCacheCandidates?(media.imageUnderstanding?'图片：实验缓存通道已连接，最多2张候选图；未绑定发言者。':'图片缓存已连接，但所选模型尚未确认支持看图。'):media.groupCacheConfigured?({awaiting_connection:'图片缓存已配置，等待授权微信连接；当前未取得图片。',model_vision_not_enabled:'图片缓存已配置，但所选模型尚未确认支持图片输入。',resource_unavailable:'图片资源读取失败；查看运行记录中的原因，当前不能看图。',awaiting_image_read:'图片缓存已配置并连接，尚未实际取得图片；需要一次读图请求验证。'}[media.nativeStatus]||'图片资源通道尚未就绪。'):'图片缓存未配置，当前没有原生图片输入。';
+  $('media-status').textContent+=' 群语音可在微信设置里开启“聊天中的语音消息自动转成文字”；小汐会读取授权群的新转写。';
+  if(media.localWaveFiles===false){$('voice-recognize').disabled=true;$('voice-file-status').textContent='可用 python -B scripts/install_voice_model.py 安装普通话识别，完成后重开客户端。';}
   const reasons=(voice.blockers||[voice.reason||'status_not_checked']).map(x=>voiceReasons[x]||x).join('；');
   $('voice-status').textContent=`小汐语音回复：${voice.ready&&voice.transportSupported?'就绪，仍按目标能力判断':'关闭，继续使用文字'}。音频文件：${voice.audioFile?'已验证':'未验证'}；原生语音气泡：${voice.voiceBubble?'已验证':'未验证'}。${reasons}`;
 }
@@ -97,6 +129,10 @@ function render(s){
     const r=s.targetStates[t.id];const session=s.sessions.find(x=>x.channel==='desktop_wechat'&&x.peerId===t.id);const row=el('div',undefined,'row');const title=el('div',undefined,'row-title');
     title.append(el('b',t.name),el('span',t.quarantined?'发送未确认，已隔离':!t.enabled?'未启用':t.paused?'已暂停回复':s.connection.stage==='stopped'?'已停止':r?stages[r.stage]||r.stage:'等待连接','tag'));
     row.append(title,el('p',(!t.enabled?'此会话不会被监听。':t.paused?'已暂停此会话回复，可由主人恢复。':s.connection.stage==='stopped'?'点击连接后开始监听。':r?.message||'等待检查窗口')+(r?.lastOutcome?' · '+r.lastOutcome:'')));
+    if(r?.lastVoice){
+      const voiceStage={waiting_transcript:'等待微信转出文字',platform_transcript:'已读到微信转写',asr_transcript:'已识别绑定录音',audio_unavailable:'绑定录音暂未识别'};
+      row.append(el('p','最近语音 · '+(voiceStage[r.lastVoice.stage]||'待核对')+' · '+new Date(r.lastVoice.at).toLocaleTimeString()));
+    }
     const actions=el('div',undefined,'actions');actions.append(button(t.paused?'恢复回复':'暂停回复',()=>call('target.pause',{id:t.id,paused:!t.paused})));
     for(const [label,control] of [['停止本轮','stop_current'],['换话题','change_topic']]){const n=button(label,()=>call('session.control',{sessionId:session.id,control}));n.disabled=!session;actions.append(n);}
     if(t.quarantined===true){

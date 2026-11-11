@@ -20,8 +20,6 @@ U.GetClassNameW.argtypes=[W.HWND,W.LPWSTR,C.c_int]
 U.IsWindowVisible.argtypes=[W.HWND]
 U.IsIconic.argtypes=[W.HWND]
 U.GetWindowRect.argtypes=[W.HWND,C.POINTER(W.RECT)]
-U.GetClientRect.argtypes=[W.HWND,C.POINTER(W.RECT)]
-U.ScreenToClient.argtypes=[W.HWND,C.POINTER(W.POINT)]
 class WINDOWPLACEMENT(C.Structure):
     _fields_=[('length',W.UINT),('flags',W.UINT),('showCmd',W.UINT),('ptMinPosition',W.POINT),('ptMaxPosition',W.POINT),('rcNormalPosition',W.RECT)]
 U.GetWindowPlacement.argtypes=[W.HWND,C.POINTER(WINDOWPLACEMENT)]
@@ -50,55 +48,23 @@ def focus_state():
 def modifiers_down():
     return any(U.GetAsyncKeyState(key)&0x8000 for key in (0x10,0x11,0x12,0x5b,0x5c))
 
-def minimized_unread_point(root_bounds,list_bounds,button_bounds,normal_size):
-    """Qt retains its client-layout origin while Win32 shrinks to an icon.
+def post_target_return(hwnd,root,field):
+    """Submit through the verified chat HWND without activating its host.
 
-    Only the verified ChatSingleWindow layout is supported. The list spans its
-    client width and the entire unread button must remain within that list.
-    No guessed screen point, window restoration or physical cursor is needed.
+    Qt UIA Invoke and MSAA default action did not submit on the inspected
+    build. Mouse messages submitted but activated the multi-account host.
+    Return has a verified no-focus local-echo path, provided unread navigation
+    has not moved Qt's internal keyboard focus away from the editor.
     """
-    left,top,right,bottom=root_bounds;width=right-left;height=bottom-top
-    if not 600<=width<=16000 or not 350<=height<=16000:raise RuntimeError('最小化群窗口布局尺寸不可用')
-    if not 0<=normal_size[0]-width<=64 or not 0<=normal_size[1]-height<=64:raise RuntimeError('最小化群窗口布局与还原尺寸不一致')
-    if list_bounds[0]!=left or list_bounds[2]!=right or not top<=list_bounds[1]<list_bounds[3]<=bottom:raise RuntimeError('最小化群消息列表边界未核验')
-    x1,y1,x2,y2=button_bounds
-    if not list_bounds[0]<=x1<x2<=list_bounds[2] or not list_bounds[1]<=y1<y2<=list_bounds[3]:raise RuntimeError('最小化新消息按钮不在消息列表内')
-    return ((x1+x2)//2-left,(y1+y2)//2-top)
-
-def post_verified_button(hwnd,button,root,region_bounds):
-    """Address a caller-verified control in its own HWND; no global pointer."""
-    bounds=rect(button)
-    if bounds[2]<=bounds[0] or bounds[3]<=bounds[1]:raise RuntimeError('新消息按钮位置不可用')
-    minimized=bool(U.IsIconic(hwnd));root_bounds=rect(root)
-    if minimized:
-        if root.ClassName!='mmui::ChatSingleWindow' or root.NativeWindowHandle!=hwnd:raise RuntimeError('最小化布局不属于当前群窗口')
-        placement=WINDOWPLACEMENT();placement.length=C.sizeof(placement)
-        if not U.GetWindowPlacement(hwnd,C.byref(placement)):raise RuntimeError('最小化群窗口还原尺寸不可用')
-        normal=placement.rcNormalPosition
-        point=W.POINT(*minimized_unread_point(root_bounds,region_bounds,bounds,(normal.right-normal.left,normal.bottom-normal.top)))
-    else:
-        point=W.POINT((bounds[0]+bounds[2])//2,(bounds[1]+bounds[3])//2);client=W.RECT()
-        if not U.ScreenToClient(hwnd,C.byref(point)) or not U.GetClientRect(hwnd,C.byref(client)):
-            raise RuntimeError('新消息按钮坐标未核验')
-        if not 0<=point.x<client.right or not 0<=point.y<client.bottom:raise RuntimeError('新消息按钮不在群窗口客户区，未发送事件')
-    if rect(button)!=bounds or rect(root)!=root_bounds or bool(U.IsIconic(hwnd))!=minimized:raise RuntimeError('新消息按钮或窗口已移动，未发送事件')
-    packed=(point.x&0xffff)|((point.y&0xffff)<<16)
-    if not U.PostMessageW(hwnd,0x0201,1,packed):raise RuntimeError('新消息按钮按下事件未受理')
-    if not U.PostMessageW(hwnd,0x0202,0,packed):raise RuntimeError('新消息按钮释放事件未受理')
-    time.sleep(.15)
-    return 'minimized_qt_client_messages' if minimized else 'target_hwnd_button_messages'
-
-def post_unread_button(hwnd,button,root):
-    messages=unique_chrome(root,lambda x:x.AutomationId=='chat_message_list','消息列表')
-    return post_verified_button(hwnd,button,root,rect(messages))
-
-def post_send_button(hwnd,button,root):
-    if button.ControlTypeName!='ButtonControl' or button.Name!='发送' or not button.IsEnabled:raise RuntimeError('发送按钮身份变化，未提交')
-    field=unique_chrome(root,lambda x:x.AutomationId=='chat_input_field','输入框')
-    bounds=rect(root);editor=rect(field);button_bounds=rect(button)
-    # The send button must be in the current input area, below the text field.
-    if not editor[1]<=button_bounds[1]<button_bounds[3]<=bounds[3]:raise RuntimeError('发送按钮不在当前输入区域')
-    return post_verified_button(hwnd,button,root,[bounds[0],editor[1],bounds[2],bounds[3]])
+    if root.ClassName!='mmui::ChatSingleWindow' or root.NativeWindowHandle!=hwnd:
+        raise RuntimeError('发送窗口身份变化，未提交')
+    if field.AutomationId!='chat_input_field' or field.ControlTypeName!='EditControl':
+        raise RuntimeError('输入框身份变化，未提交')
+    if not U.PostMessageW(hwnd,0x0100,0x0d,0x001C0001):
+        raise RuntimeError('回车按下事件未受理')
+    if not U.PostMessageW(hwnd,0x0101,0x0d,0xC01C0001):
+        raise RuntimeError('回车释放事件未受理')
+    return 'target_hwnd_return'
 
 def desktop_ready():
     handle=U.OpenInputDesktop(0,False,1)
@@ -148,11 +114,6 @@ def walk(root,limit=1600):
         yield control
         stack.extend(reversed(control.GetChildren()))
 
-def unique(root,predicate,label):
-    matches=[x for x in walk(root) if predicate(x)]
-    if len(matches)!=1:raise RuntimeError(label+'不唯一或不可访问')
-    return matches[0]
-
 def chat_content_id(automation_id):
     """Content boundaries verified for the supported WeChat UIA layout."""
     return (automation_id in ('chat_message_list','chat_input_field') or
@@ -177,11 +138,6 @@ def walk_chrome(root,limit=400):
         yield control
         if chat_content_id(automation_id) or automation_id.startswith('session_item_'):continue
         stack.extend(reversed(control.GetChildren()))
-
-def unique_chrome(root,predicate,label):
-    matches=[control for control in walk_chrome(root) if predicate(control)]
-    if len(matches)!=1:raise RuntimeError(label+'不唯一或不可访问')
-    return matches[0]
 
 def unique_in(controls,predicate,label):
     matches=[control for control in controls if predicate(control)]
@@ -266,7 +222,7 @@ class Bridge:
         if CONFIG.get('native',{}).get('enabled') is not True:raise RuntimeError('native_wechat_unsupported_or_disabled')
         self.config={'account':{'binding':{'account_folder':CONFIG['account']['folder']}},'allowed_groups':list(AUTHORIZED_GROUPS.values())}
         self.guard=None; self.pid=None; self.created=None;self.main=None;self.rooms={};self.last_identity=0
-        self.closed=threading.Event()
+        self.closed=threading.Event();self.return_focus_uncertain={}
         configured=self.config['allowed_groups']
         if not isinstance(configured,list) or not 1<=len(configured)<=64 or any(not isinstance(name,str) or name not in AUTHORIZED_GROUPS.values() for name in configured) or len(set(configured))!=len(configured):raise RuntimeError('隐私范围仅限本机配置的授权群')
         self.targets=[dict(id=next(key for key,value in AUTHORIZED_GROUPS.items() if value==name),name=name,kind='group') for name in configured]
@@ -277,6 +233,64 @@ class Bridge:
         if len(found)!=1:raise RuntimeError('目标会话未配置或重名')
         if not authorized_target(found[0]):raise RuntimeError('会话身份不在已授权范围')
         return found[0]
+
+    def _load_return_focus_state(self,wins):
+        """Notice a previous jump in this exact process/window, metadata only."""
+        self.return_focus_uncertain={}
+        tick=focus_state()['lastInputTick']
+        for target in self.targets:
+            matching=[row for row in wins if row['pid']==self.pid and row['title']==target['name']]
+            if len(matching)!=1:continue
+            path=ROOT/'data'/('unread_refresh_'+target['id']+'.json')
+            try:receipt=json.loads(path.read_text(encoding='utf-8'))
+            except FileNotFoundError:continue
+            except (OSError,ValueError,TypeError) as error:
+                raise RuntimeError('本群旧版后台跳转记录不可读取，已暂停连接') from error
+            if not isinstance(receipt,dict):raise RuntimeError('本群旧版后台跳转记录格式异常，已暂停连接')
+            if (receipt.get('pid')==self.pid and receipt.get('hwnd')==matching[0]['hwnd'] and
+                    isinstance(receipt.get('at'),(int,float)) and receipt['at']>=self.created and
+                    receipt.get('focusUnchanged') is False):
+                self.return_focus_uncertain[target['name']]={'pid':self.pid,'created':self.created,
+                    'hwnd':matching[0]['hwnd'],'lastInputTick':tick}
+
+    def _return_focus_is_uncertain(self,name,hwnd):
+        entry=getattr(self,'return_focus_uncertain',{}).get(name)
+        return bool(entry and entry.get('pid')==getattr(self,'pid',None) and
+                    abs(entry.get('created',0)-getattr(self,'created',0))<.001 and entry.get('hwnd')==hwnd)
+
+    def _clear_return_focus_on_owner_input(self,name,hwnd,field):
+        if not self._return_focus_is_uncertain(name,hwnd):return
+        self.check()  # Revalidate the bound process and creation time on recovery.
+        entry=self.return_focus_uncertain[name]
+        try:
+            state=focus_state();previous=entry.get('lastInputTick');current=state['lastInputTick']
+            # A bot-posted unread click does not advance Windows' physical input
+            # timestamp. Require a later human input even when Qt reports focus.
+            if not isinstance(previous,int) or not isinstance(current,int):return
+            if not 0<((current-previous)&0xffffffff)<0x80000000:return
+            group_pid=W.DWORD()
+            if not U.GetWindowThreadProcessId(hwnd,C.byref(group_pid)) or group_pid.value!=self.pid:return
+            if state['foreground']==hwnd:
+                if state['foregroundPid']!=self.pid:return
+            else:
+                # The carrier embeds the account's verified main window in a
+                # vendor host. Accept that host only through the current bound
+                # main HWND's parent chain; an arbitrary foreground is rejected.
+                main=getattr(self,'main',None)
+                if not main or state['foreground']==main:return
+                main_pid=W.DWORD()
+                if not U.GetWindowThreadProcessId(main,C.byref(main_pid)) or main_pid.value!=self.pid:return
+                main_root=auto.ControlFromHandle(main)
+                if (main_root.ClassName!='mmui::MainWindow' or
+                        main_root.ControlTypeName!='WindowControl' or
+                        main_root.NativeWindowHandle!=main):return
+                host=int(U.GetAncestor(main,2) or 0)
+                if host in (0,main) or state['foreground']!=host:return
+                host_pid=W.DWORD()
+                if not U.GetWindowThreadProcessId(host,C.byref(host_pid)) or host_pid.value!=state['foregroundPid']:return
+            if not field.HasKeyboardFocus:return
+        except Exception:return  # A transient UIA failure must retain uncertainty.
+        del self.return_focus_uncertain[name]
 
     def check(self,identity=False):
         try:
@@ -316,6 +330,7 @@ class Bridge:
         main=[x for x in wins if x['pid']==self.pid and x['title'] in ('微信','Weixin','WeChat') and x['width']>=600 and x['height']>=350]
         if len(main)!=1:raise RuntimeError('微信主窗口不唯一，请在多开神器中拆分Example Account窗口')
         self.main=main[0]['hwnd']
+        self._load_return_focus_state(wins)
         self.guard=subprocess.Popen([sys.executable,'-B',str(ROOT/'scripts/accessibility_guard.py')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,encoding='utf-8',creationflags=0x08000000,cwd=ROOT)
         self.guard.stdin.write(json.dumps(dict(pid=self.pid,created=self.created,parent=os.getpid()))+'\n');self.guard.stdin.flush()
         ready=json.loads(self.guard.stdout.readline())
@@ -349,6 +364,7 @@ class Bridge:
         is_group=any(x.ClassName=='mmui::ChatTitleBarChatRoomView' for x in chrome)
         if is_group!=(target['kind']=='group'):raise RuntimeError('会话类型不匹配')
         target['windowBinding']=peer
+        if chrome_out is not None:chrome_out.extend(chrome)
         return root,row['hwnd']
 
     def open_room(self,name,allow_foreground=False):
@@ -375,6 +391,7 @@ class Bridge:
             root,hwnd=self.room(name,chrome_out=chrome)
         messages=unique_in(chrome,lambda x:x.AutomationId=='chat_message_list','消息列表')
         field=unique_in(chrome,lambda x:x.AutomationId=='chat_input_field','输入框')
+        self._clear_return_focus_on_owner_input(name,hwnd,field)
         bubbles=list(message_bubbles(messages))
         data=[]
         for bubble in bubbles[-100:]:
@@ -424,75 +441,29 @@ class Bridge:
         return dict(group=name,windowBinding=root.AutomationId,hwnd=hwnd,pid=self.pid,created=self.created,messages=delivered,draft=bool(field.GetValuePattern().Value),listRect=rect(messages),continuity=continuity)
 
     def refresh_unread(self,name,root,hwnd):
-        """Advance only an approved, background chat's own unread controls.
+        """Refuse to baseline an out-of-viewport message without moving UI.
 
-        Qt exposes only viewport bubbles. A readable but scrolled-away window
-        otherwise looks healthy forever while new messages never reach ingest.
-        No screen capture, global input, activation or scroll-to-old-history.
+        The supported Qt build needs a targeted mouse click to jump to unread
+        messages, and that click has activated the multi-account host in live
+        traces. The owner must make this navigation; ordinary viewport reads
+        continue automatically. Raising keeps the message tracker unchanged.
         """
         self.target(name)
         if getattr(self,'focus_depth',0):return False
-        if not hasattr(self,'unread_refresh_times'):self.unread_refresh_times={}
-        if not hasattr(self,'unread_refresh_errors'):self.unread_refresh_errors={}
-        if time.monotonic()<self.unread_refresh_times.get(name,0):
-            if self.unread_refresh_errors.get(name):raise RuntimeError(self.unread_refresh_errors[name])
-            return False
-        before=focus_state()
-        if before['foregroundPid']==self.pid or modifiers_down():return False
-        def controls(current):
-            found=[]
-            for item in walk_notices(current):
-                if item.ControlTypeName!='ButtonControl':continue
-                label=item.Name or ''
-                kind='new_messages' if re.fullmatch(r'\d+条新消息',label) else 'mention' if label.endswith('提到了你') else None
-                if kind and item.IsEnabled and item.GetPropertyValue(30031):found.append((kind,item))
-            return sorted(found,key=lambda row:row[0]!='new_messages')
-        self.unread_refresh_times[name]=time.monotonic()+3
-        if not controls(root):
-            self.unread_refresh_errors.pop(name,None)
-            return False
-        actions=[];mechanisms=[];used=set();remaining=[];unread_count=0
-        with self.focus_lease(name,hwnd) as guard:
-            for _ in range(3):
-                self.check(True)
-                current,current_hwnd=self.room(name)
-                state=focus_state()
-                if current_hwnd!=hwnd or guard.poll() is not None or state['foreground']!=before['foreground'] or state['foregroundPid']==self.pid or modifiers_down():break
-                available=controls(current)
-                if not available:break
-                kind,button=available[0]
-                key=(kind,tuple(button.GetRuntimeId()))
-                if key in used:break
-                used.add(key)
-                count=int(re.match(r'^\d+',button.Name).group()) if kind=='new_messages' else 0
-                mechanisms.append(post_unread_button(hwnd,button,current))
-                actions.append(kind)
-                unread_count+=count
-            current,current_hwnd=self.room(name)
-            if current_hwnd!=hwnd:raise RuntimeError('后台跳转期间群窗口已更换')
-            remaining=[kind for kind,_ in controls(current)]
-        time.sleep(.1)
-        after=focus_state()
-        receipt={'at':time.time(),'targetId':self.target(name)['id'],'pid':self.pid,'hwnd':hwnd,'actions':actions,'mechanisms':mechanisms,'remainingNotices':remaining,'latestViewportReached':bool(actions) and not remaining,'minimizedAfter':bool(U.IsIconic(hwnd)),'foregroundBefore':before['foreground'],'foregroundAfter':after['foreground'],'focusUnchanged':before['foreground']==after['foreground'],'globalInputSent':False}
-        (ROOT/'data'/('unread_refresh_'+self.target(name)['id']+'.json')).write_text(json.dumps(receipt),encoding='utf-8')
-        # A user may switch between unrelated apps while the verified jump is
-        # finishing. The loop already stops further actions on focus change.
-        # Do not discard its unread-count proof: the next poll would otherwise
-        # baseline the newly reached messages and silently lose the request.
-        # Reading this bound group is still allowed; sending has separate guards.
-        if remaining:
-            self.unread_refresh_times[name]=time.monotonic()+15
-            self.unread_refresh_errors[name]='群窗口仍停在旧消息，后台跳转尚未成功；稍后自动重试'
-            raise RuntimeError(self.unread_refresh_errors[name])
-        self.unread_refresh_errors.pop(name,None)
-        return {'advanced':True,'unreadCount':unread_count} if actions else False
+        for item in walk_notices(root):
+            if item.ControlTypeName!='ButtonControl' or not item.IsEnabled:continue
+            label=item.Name or ''
+            if re.fullmatch(r'\d+条新消息',label) or label.endswith('提到了你'):
+                raise RuntimeError('群“'+name+'”停在旧消息：请在微信中手动点未读提示跳到最新，再最小化群窗口；小汐已暂停本群读取，避免漏读或抢前台')
+        return False
 
     def prepare(self,name,text,expected_hwnd=None):
         if not isinstance(text,str) or not text.strip() or len(text)>4000:raise RuntimeError('消息为空或超过4000字')
         self.check(True)
-        root,hwnd=self.room(name)
+        chrome=[]
+        root,hwnd=self.room(name,chrome_out=chrome)
         if expected_hwnd is not None and hwnd!=expected_hwnd:raise RuntimeError('会话窗口已更换，未输入')
-        field=unique_chrome(root,lambda x:x.AutomationId=='chat_input_field','输入框')
+        field=unique_in(chrome,lambda x:x.AutomationId=='chat_input_field','输入框')
         value=field.GetValuePattern()
         if value.Value:raise RuntimeError('微信输入框有手动草稿，已暂停发送')
         value.SetValue(text,waitTime=.2)
@@ -558,7 +529,9 @@ class Bridge:
         submitted=False;value=None;protected=None
         try:
             before=self.read(name);old={x['id'] for x in before['messages']}
-            root,hwnd=self.room(name)
+            hwnd=before['hwnd']
+            if self._return_focus_is_uncertain(name,hwnd):
+                return dict(status='deferred',ids=[],note='后台跳转后输入焦点未确认；请在该群输入框点一下，再切回其他软件')
             if before['draft']:return dict(status='deferred',ids=[],note='输入框有手动草稿，待清空后发送')
             if U.GetForegroundWindow()==hwnd or (getattr(self,'pid',None) and focus_state()['foregroundPid']==self.pid):return dict(status='deferred',ids=[],note='正在使用Example Account微信窗口，切换到其他软件后发送')
             if modifiers_down():return dict(status='deferred',ids=[],note='正在使用快捷键，松开后发送')
@@ -568,15 +541,19 @@ class Bridge:
                     root,field,value,hwnd=self.prepare(name,text,expected_hwnd=hwnd)
                     self.mark_send('prepared')
                     self.check(True)
-                    if self.room(name)[1]!=hwnd:raise RuntimeError('发送前会话窗口已更换')
+                    chrome=[]  # Freshly bound controls for this commit only.
+                    commit_root,commit_hwnd=self.room(name,chrome_out=chrome)
+                    if commit_hwnd!=hwnd:raise RuntimeError('发送前会话窗口已更换')
                     if protected.poll() is not None:raise RuntimeError('后台焦点保护已停止，未发送')
                     if value.Value!=text:raise RuntimeError('发送前草稿变化，未发送')
+                    commit_field=unique_in(chrome,lambda x:x.AutomationId=='chat_input_field','输入框')
+                    if commit_field.GetValuePattern().Value!=text:raise RuntimeError('发送前草稿变化，未发送')
                     if U.GetForegroundWindow()==hwnd or (getattr(self,'pid',None) and focus_state()['foregroundPid']==self.pid):return dict(status='deferred',ids=[],note='正在使用Example Account微信窗口，切换到其他软件后发送')
-                    button=unique(root,lambda x:x.ControlTypeName=='ButtonControl' and x.Name=='发送','发送按钮')
+                    button=unique_in(chrome,lambda x:x.ControlTypeName=='ButtonControl' and x.Name=='发送','发送按钮')
                     if not button.IsEnabled:raise RuntimeError('发送按钮不可调用')
                     if modifiers_down():return dict(status='deferred',ids=[],note='正在使用快捷键，松开后发送')
                     submitted=True
-                    post_send_button(hwnd,button,root)
+                    post_target_return(hwnd,commit_root,commit_field)
                     self.mark_send('posted')
                     deadline=time.monotonic()+5
                     while time.monotonic()<deadline:

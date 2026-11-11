@@ -2,8 +2,9 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
+import {MAX_WAVE_BYTES,transcribeLocalWave} from './local_asr.mjs';
 const TYPES={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
-export async function startPanel({core,root,port=8765,demo=false}) {
+export async function startPanel({core,root,port=8765,demo=false,transcribeWave=transcribeLocalWave}) {
  const token=randomBytes(32).toString('hex');let origin;
  const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Frame-Options','DENY');res.setHeader('Cross-Origin-Resource-Policy','same-origin');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
@@ -11,9 +12,22 @@ export async function startPanel({core,root,port=8765,demo=false}) {
   try{
    if(req.headers['sec-fetch-site']==='cross-site'||req.headers.host!==new URL(origin).host)return reply(403,{error:'host_denied'});
    const url=new URL(req.url,origin);
-   if(req.method==='POST'&&url.pathname==='/api/call'){
+   if(req.method==='POST'&&['/api/call','/api/voice-file'].includes(url.pathname)){
     const supplied=Buffer.from(String(req.headers['x-xiaoxi-token']??''));const expected=Buffer.from(token);
     if(req.headers.origin!==origin||supplied.length!==expected.length||!timingSafeEqual(supplied,expected))return reply(403,{error:'owner_token_required'});
+    if(url.pathname==='/api/voice-file'){
+      if(req.headers['content-type']!=='audio/wav')return reply(415,{error:'wave_pcm16_required'});
+      const chunks=[];let length=0;
+      for await(const chunk of req){
+        length+=chunk.length;
+        if(length>MAX_WAVE_BYTES)return reply(413,{error:'wave_size_invalid'});
+        chunks.push(chunk);
+      }
+      const controller=new AbortController();
+      res.once('close',()=>controller.abort());
+      const result=await transcribeWave(Buffer.concat(chunks,length),{language:url.searchParams.get('language')??'zh-CN',signal:controller.signal});
+      return reply(200,{result});
+    }
     if(!req.headers['content-type']?.startsWith('application/json'))return reply(415,{error:'json_required'});
     let body='',size=0;for await(const chunk of req){size+=chunk.length;if(size>256*1024)return reply(413,{error:'request_too_large'});body+=chunk;}
     const {action,payload={}}=JSON.parse(body);

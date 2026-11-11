@@ -5,7 +5,7 @@ _test_sys.path.insert(0, str(_test_pathlib.Path(__file__).resolve().parent))
 from native_test_bootstrap import configure_test_environment
 configure_test_environment()
 
-import sys, pathlib, unittest
+import sys, pathlib, unittest, json, tempfile
 from contextlib import contextmanager
 from unittest.mock import patch, Mock
 from types import SimpleNamespace
@@ -132,19 +132,19 @@ class Guards(unittest.TestCase):
 
     def test_existing_manual_draft_is_never_overwritten(self):
         import desktop_bridge
-        b=object.__new__(Bridge);b.check=lambda *_:None;b.room=lambda *_:(object(),1)
+        b=object.__new__(Bridge);b.check=lambda *_:None;b.room=lambda *_,**__:(object(),1)
         class Pattern:
             Value='my manual draft'
             def SetValue(self,*_):raise AssertionError('manual draft overwritten')
         class Field:
             def GetValuePattern(self):return Pattern()
-        original=desktop_bridge.unique_chrome;desktop_bridge.unique_chrome=lambda *_:Field()
+        original=desktop_bridge.unique_in;desktop_bridge.unique_in=lambda *_:Field()
         try:
             with self.assertRaisesRegex(RuntimeError,'手动草稿'):b.prepare('allowed','hello')
-        finally:desktop_bridge.unique_chrome=original
+        finally:desktop_bridge.unique_in=original
 
     def test_recreated_window_is_rejected_before_setting_value(self):
-        b=object.__new__(Bridge);b.check=lambda *_:None;b.room=lambda *_:(object(),2)
+        b=object.__new__(Bridge);b.check=lambda *_:None;b.room=lambda *_,**__:(object(),2)
         with self.assertRaisesRegex(RuntimeError,'窗口已更换'):b.prepare('allowed','hello',expected_hwnd=1)
 
     def test_background_send_protects_input_until_echo_and_never_activates(self):
@@ -158,24 +158,81 @@ class Guards(unittest.TestCase):
         @contextmanager
         def lease(*_):
             events.append('acquire');yield Guard();events.append('restore')
-        b.focus_lease=lease;b.check=lambda *_:None;b.room=lambda *_:(object(),1)
-        reads=[{'messages':[],'draft':False},{'messages':[{'id':'new','text':'hello'}],'draft':False}]
+        b.focus_lease=lease;b.check=lambda *_:None;b.room=lambda *_,**__:(object(),1)
+        reads=[{'hwnd':1,'messages':[],'draft':False},{'messages':[{'id':'new','text':'hello'}],'draft':False}]
         b.read=lambda *_:reads.pop(0)
         def prepare(*_,**kwargs):
             self.assertEqual(kwargs['expected_hwnd'],1);events.append('prepare');return object(),object(),Pattern(),1
         b.prepare=prepare
-        with patch.object(d.U,'GetForegroundWindow',return_value=2),patch.object(d,'unique',return_value=Button()),patch.object(d,'post_send_button',side_effect=lambda *_:events.append('post')),patch.object(d,'foreground',side_effect=AssertionError('foreground activation')):
+        field=Mock();field.GetValuePattern.return_value=Pattern()
+        with patch.object(d.U,'GetForegroundWindow',return_value=2),patch.object(d,'unique_in',side_effect=[field,Button()]),patch.object(d,'post_target_return',side_effect=lambda *_:events.append('return')),patch.object(d,'foreground',side_effect=AssertionError('foreground activation')):
             self.assertEqual(b._send('allowed','hello')['status'],'local_echo')
-        self.assertEqual(events,['acquire','prepare','post','restore'])
+        self.assertEqual(events,['acquire','prepare','return','restore'])
 
     def test_manual_draft_or_active_target_defers_without_input_or_lease(self):
         import desktop_bridge as d
         for draft,foreground in [(True,2),(False,1)]:
-            b=object.__new__(Bridge);b.read=lambda *_:{'messages':[],'draft':draft};b.room=lambda *_:(object(),1)
+            b=object.__new__(Bridge);b.read=lambda *_:{'hwnd':1,'messages':[],'draft':draft};b.room=lambda *_,**__:(object(),1)
             b.focus_lease=lambda *_:self.fail('must not acquire or type')
             with patch.object(d.U,'GetForegroundWindow',return_value=foreground):self.assertEqual(b._send('allowed','hello')['status'],'deferred')
 
-    def test_partial_post_failure_remains_unknown_and_draft_is_not_cleared(self):
+    def test_unread_navigation_focus_uncertainty_defers_before_draft_or_send(self):
+        b=object.__new__(Bridge);b.pid=20;b.created=100
+        b.return_focus_uncertain={'allowed':{'pid':20,'created':100,'hwnd':1,'reason':'unread_navigation'}}
+        b.read=lambda *_:{'hwnd':1,'messages':[],'draft':False};b.room=lambda *_,**__:(object(),1)
+        b.focus_lease=lambda *_:self.fail('must not write a draft or submit')
+        result=b._send('allowed','hello')
+        self.assertEqual(result['status'],'deferred')
+        self.assertIn('输入焦点未确认',result['note'])
+
+    def test_old_unread_jump_receipt_matches_only_same_live_process_and_window(self):
+        import desktop_bridge as d
+        target_id,name=next(iter(d.AUTHORIZED_GROUPS.items()))
+        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
+            root=pathlib.Path(directory);(root/'data').mkdir()
+            receipt=root/'data'/('unread_refresh_'+target_id+'.json')
+            receipt.write_text(json.dumps({'pid':20,'hwnd':1,'at':101,'focusUnchanged':False}),encoding='utf-8')
+            rows=[{'pid':20,'title':name,'hwnd':1}]
+            same=object.__new__(Bridge);same.pid=20;same.created=100
+            same.targets=[{'id':target_id,'name':name,'kind':'group'}];same.main=10;same.check=Mock()
+            with patch.object(d,'ROOT',root),patch.object(d,'focus_state',return_value={'lastInputTick':50}):
+                same._load_return_focus_state(rows)
+                self.assertTrue(same._return_focus_is_uncertain(name,1))
+                other=object.__new__(Bridge);other.pid=20;other.created=102;other.targets=same.targets
+                other._load_return_focus_state(rows)
+                self.assertFalse(other._return_focus_is_uncertain(name,1))
+                receipt.write_text(json.dumps({'pid':21,'hwnd':1,'at':103,'focusUnchanged':False}),encoding='utf-8')
+                other._load_return_focus_state(rows)
+                self.assertFalse(other._return_focus_is_uncertain(name,1))
+
+    def test_uncertain_focus_clears_only_on_bound_group_or_host_with_new_user_input(self):
+        import desktop_bridge as d
+        b=object.__new__(Bridge);b.pid=20;b.created=100;b.main=10;b.check=Mock()
+        b.return_focus_uncertain={'allowed':{'pid':20,'created':100,'hwnd':1,'lastInputTick':50}}
+        field=Mock(HasKeyboardFocus=True)
+        main=SimpleNamespace(ClassName='mmui::MainWindow',ControlTypeName='WindowControl',NativeWindowHandle=10)
+        pid_by_hwnd={1:20,10:20,99:30,88:40}
+        def window_pid(hwnd,pointer):
+            pointer._obj.value=pid_by_hwnd.get(hwnd,0)
+            return 1 if pointer._obj.value else 0
+        with patch.object(d.U,'GetWindowThreadProcessId',side_effect=window_pid),\
+             patch.object(d.U,'GetAncestor',return_value=99),\
+             patch.object(d.auto,'ControlFromHandle',return_value=main),\
+             patch.object(d,'focus_state',return_value={'foreground':88,'foregroundPid':40,'lastInputTick':51}) as state:
+            b._clear_return_focus_on_owner_input('allowed',1,field)
+            self.assertTrue(b._return_focus_is_uncertain('allowed',1))
+            state.return_value={'foreground':99,'foregroundPid':30,'lastInputTick':50}
+            b._clear_return_focus_on_owner_input('allowed',1,field)
+            self.assertTrue(b._return_focus_is_uncertain('allowed',1))
+            state.return_value={'foreground':99,'foregroundPid':30,'lastInputTick':51}
+            pid_by_hwnd[10]=21
+            b._clear_return_focus_on_owner_input('allowed',1,field)
+            self.assertTrue(b._return_focus_is_uncertain('allowed',1))
+            pid_by_hwnd[10]=20
+            b._clear_return_focus_on_owner_input('allowed',1,field)
+        self.assertFalse(b._return_focus_is_uncertain('allowed',1))
+
+    def test_ambiguous_return_failure_remains_unknown_and_draft_is_not_cleared(self):
         import desktop_bridge as d
         b=object.__new__(Bridge)
         class Guard:
@@ -186,14 +243,15 @@ class Guards(unittest.TestCase):
         class Button:IsEnabled=True
         @contextmanager
         def lease(*_):yield Guard()
-        b.focus_lease=lease;b.check=lambda *_:None;b.room=lambda *_:(object(),1)
-        b.read=lambda *_:{'messages':[],'draft':False};b.prepare=lambda *_,**__:(object(),object(),Pattern(),1)
-        with patch.object(d.U,'GetForegroundWindow',return_value=2),patch.object(d,'unique',return_value=Button()),patch.object(d,'post_send_button',side_effect=RuntimeError('up rejected')):
+        b.focus_lease=lease;b.check=lambda *_:None;b.room=lambda *_,**__:(object(),1)
+        b.read=lambda *_:{'hwnd':1,'messages':[],'draft':False};b.prepare=lambda *_,**__:(object(),object(),Pattern(),1)
+        field=Mock();field.GetValuePattern.return_value=Pattern()
+        with patch.object(d.U,'GetForegroundWindow',return_value=2),patch.object(d,'unique_in',side_effect=[field,Button()]),patch.object(d,'post_target_return',side_effect=RuntimeError('return result unknown')):
             self.assertEqual(b._send('allowed','hello')['status'],'unknown')
 
     def test_modifier_key_defers_before_draft_or_commit(self):
         import desktop_bridge as d
-        b=object.__new__(Bridge);b.read=lambda *_:{'messages':[],'draft':False};b.room=lambda *_:(object(),1)
+        b=object.__new__(Bridge);b.read=lambda *_:{'hwnd':1,'messages':[],'draft':False};b.room=lambda *_,**__:(object(),1)
         b.focus_lease=lambda *_:self.fail('must not acquire while a shortcut is held')
         with patch.object(d.U,'GetForegroundWindow',return_value=2),patch.object(d,'modifiers_down',return_value=True):
             self.assertEqual(b._send('allowed','hello')['status'],'deferred')
@@ -212,9 +270,10 @@ class Guards(unittest.TestCase):
             pattern=Pattern()
             @contextmanager
             def lease(*_):yield Guard()
-            b.focus_lease=lease;b.check=lambda *_:None;b.room=lambda *_:(object(),1)
-            b.read=lambda *_:{'messages':[],'draft':False};b.prepare=lambda *_,**__:(object(),object(),pattern,1)
-            with patch.object(d.U,'GetForegroundWindow',return_value=2),patch.object(d,'modifiers_down',side_effect=[False,True]),patch.object(d,'unique',return_value=Button()),patch.object(d,'post_send_button',side_effect=AssertionError('must not commit')):
+            b.focus_lease=lease;b.check=lambda *_:None;b.room=lambda *_,**__:(object(),1)
+            b.read=lambda *_:{'hwnd':1,'messages':[],'draft':False};b.prepare=lambda *_,**__:(object(),object(),pattern,1)
+            field=Mock();field.GetValuePattern.return_value=pattern
+            with patch.object(d.U,'GetForegroundWindow',return_value=2),patch.object(d,'modifiers_down',side_effect=[False,True]),patch.object(d,'unique_in',side_effect=[field,Button()]),patch.object(d,'post_target_return',side_effect=AssertionError('must not commit')):
                 result=b._send('allowed','hello')
             self.assertEqual(result['status'],'deferred' if clear_works else 'not_sent')
             self.assertEqual(pattern.Value,'' if clear_works else 'hello')

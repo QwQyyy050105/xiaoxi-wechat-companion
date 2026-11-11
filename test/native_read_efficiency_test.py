@@ -7,7 +7,8 @@ import time
 import unittest
 from types import SimpleNamespace
 from contextlib import contextmanager
-from unittest.mock import patch
+from contextlib import nullcontext
+from unittest.mock import Mock, call, patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'test'))
@@ -152,43 +153,23 @@ class NativeReadEfficiencyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, '数量异常'):
             list(d.message_bubbles(messages, limit=2))
 
-    def test_switching_apps_after_unread_jump_retains_verified_new_message_once(self):
+    def test_unread_notice_stops_before_tracker_observe_until_owner_jumps(self):
         bridge, name, root, messages, field, bubbles = fixture(2)
-        read_once(bridge, name, self.path)
-        bridge.unread_refresh_times = {}
-        bridge.check = lambda *args: None
+        first=read_once(bridge, name, self.path)
         notice = Control('new_notice', text='1条新消息', role='ButtonControl', number=50)
         notice.IsEnabled = True
-        notice.GetPropertyValue = lambda _: True
         messages.children.append(notice)
         new_message = Control('fresh.chat_bubble_item_view', text='new synthetic question', number=90,
                               klass='mmui::ChatTextItemView')
-        posted = []
-        @contextmanager
-        def lease(*args):
-            yield SimpleNamespace(poll=lambda: None)
-        bridge.focus_lease = lease
-        state = {'foreground': 55, 'foregroundPid': 99}
-        def post(*args):
-            posted.append(True)
-            messages.children = [new_message]
-            state.update(foreground=66, foregroundPid=88)
-            return 'synthetic_hwnd_messages'
-        with patch.object(d, 'ROOT', self.path), patch.object(d, 'focus_state', side_effect=lambda: dict(state)), \
-             patch.object(d, 'modifiers_down', return_value=False), patch.object(d, 'post_unread_button', side_effect=post), \
-             patch.object(d, 'U', SimpleNamespace(IsIconic=lambda _: True, IsWindowVisible=lambda _: True,
-                                                 GetAncestor=lambda *_: 7)), patch.object(d.time, 'sleep'):
-            result = bridge.read(name)
-        self.assertEqual(len(posted), 1)
-        self.assertEqual(result['continuity']['mode'], 'verified_unread_tail')
-        self.assertEqual(result['continuity']['unreadCount'], 1)
-        self.assertEqual(result['messages'][-1]['text'], 'new synthetic question')
-        next_read = read_once(bridge, name, self.path)
-        self.assertEqual([r['id'] for r in next_read['messages']], [r['id'] for r in result['messages']])
-        receipt = json.loads((self.path/'data'/('unread_refresh_'+bridge.targets[0]['id']+'.json')).read_text())
-        self.assertFalse(receipt['focusUnchanged'])
-        self.assertTrue(receipt['latestViewportReached'])
-        self.assertFalse(receipt['globalInputSent'])
+        with patch.object(d.U,'PostMessageW',side_effect=AssertionError('no unread click')):
+            with self.assertRaisesRegex(RuntimeError,'手动点未读提示跳到最新'):
+                read_once(bridge,name,self.path)
+        self.assertEqual(bridge.message_tracker.rooms[name]['rows'][-1]['text'],first['messages'][-1]['text'])
+        # A human jump changes the viewport; only then may normal ingestion see it.
+        messages.children=[*bubbles,new_message]
+        result=read_once(bridge,name,self.path)
+        self.assertEqual(result['messages'][-1]['text'],'new synthetic question')
+        self.assertEqual(bridge.message_tracker.rooms[name]['rows'][-1]['text'],'new synthetic question')
 
     def test_unread_jump_reacquires_changed_view_before_returning_messages(self):
         bridge, name, root, messages, field, bubbles = fixture(1)
@@ -225,6 +206,108 @@ class NativeReadEfficiencyTests(unittest.TestCase):
         root = Control('root', [Control(f'node_{i}') for i in range(6)])
         with self.assertRaisesRegex(RuntimeError, '数量异常'):
             list(d.walk_notices(root, limit=3))
+
+
+
+class SendChromeTests(unittest.TestCase):
+    def setUp(self):
+        self.bridge, self.name, self.root, self.messages, self.field, _ = fixture(100)
+        del self.bridge.room  # exercise the production room() binding and snapshot
+        self.root.NativeWindowHandle = 7
+        self.title = Control('header.current_chat_name_label', text=self.name)
+        self.group = Control('header', [self.title], klass='mmui::ChatTitleBarChatRoomView')
+        self.button = Control('submit', text='发送', role='ButtonControl')
+        self.button.IsEnabled = True
+        self.root.children.extend([self.group, self.button])
+        self.pattern = SimpleNamespace(Value='')
+        self.pattern.SetValue = lambda text, **_: setattr(self.pattern, 'Value', text)
+        self.field.GetValuePattern = lambda: self.pattern
+        self.bridge.check = Mock()
+        self.bridge.focus_lease = lambda *_: nullcontext(SimpleNamespace(poll=lambda: None))
+        self.window = dict(pid=self.bridge.pid, title=self.name, hwnd=7)
+        self.start_patch(d, 'desktop_ready')
+        self.start_patch(d, 'windows', return_value=[self.window])
+        self.start_patch(d.auto, 'ControlFromHandle', return_value=self.root)
+        self.start_patch(d.U, 'GetForegroundWindow', return_value=99)
+        self.start_patch(d, 'focus_state', return_value={'foregroundPid': 999})
+        self.start_patch(d, 'modifiers_down', return_value=False)
+        self.post = self.start_patch(d.U, 'PostMessageW', return_value=True)
+
+    def start_patch(self, target, attr, **options):
+        patcher = patch.object(target, attr, **options)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def stub_snapshot_and_echo(self):
+        self.bridge.read = Mock(side_effect=[
+            {'hwnd': 7, 'messages': [], 'draft': False},
+            {'hwnd': 7, 'messages': [{'id': 'new', 'text': 'reply'}], 'draft': False},
+        ])
+
+    def test_real_room_supplies_readable_chrome_only_after_group_binding(self):
+        chrome = []
+        root, hwnd = self.bridge.room(self.name, chrome_out=chrome)
+        self.assertIs(root, self.root)
+        self.assertEqual(hwnd, 7)
+        self.assertIn(self.field, chrome)
+        self.assertIn(self.messages, chrome)
+        self.assertIn(self.button, chrome)
+        self.assertEqual(self.messages.children_reads, 0)
+        self.assertTrue(all(item not in chrome for item in self.messages.children))
+
+    def test_invalid_group_title_does_not_export_editor_or_list(self):
+        self.title.Name = 'other room'
+        chrome = []
+        with self.assertRaisesRegex(RuntimeError, '群标题不匹配'):
+            self.bridge.room(self.name, chrome_out=chrome)
+        self.assertEqual(chrome, [])
+
+    def test_prepare_and_commit_each_walk_the_bound_chrome_once(self):
+        self.stub_snapshot_and_echo()
+        self.messages.children[0].children.append(Control('fake-submit', text='发送', role='ButtonControl'))
+        result = self.bridge._send(self.name, 'reply')
+        self.assertEqual(result['status'], 'local_echo', result)
+        self.assertEqual(self.bridge.check.call_args_list.count(call(True)), 2)
+        self.assertEqual(self.root.children_reads, 2)
+        self.assertEqual(self.messages.children_reads, 0)
+        self.assertEqual(self.field.children_reads, 0)
+        self.assertEqual([c.args[:3] for c in self.post.call_args_list],
+                         [(7, 0x0100, 13), (7, 0x0101, 13)])
+
+    def test_duplicate_visible_controls_fail_before_return(self):
+        self.root.children.append(Control('also-submit', text='发送', role='ButtonControl'))
+        self.stub_snapshot_and_echo()
+        result = self.bridge._send(self.name, 'reply')
+        self.assertEqual(result['status'], 'not_sent')
+        self.assertIn('发送按钮不唯一', result['note'])
+        self.assertEqual(self.pattern.Value, '')
+        self.post.assert_not_called()
+
+    def test_replaced_editor_is_read_again_at_commit(self):
+        self.stub_snapshot_and_echo()
+        def replace_editor(text, **_):
+            self.pattern.Value = text
+            new_editor = Control('chat_input_field', role='EditControl')
+            new_editor.value = 'owner typed into replacement'
+            self.root.children[self.root.children.index(self.field)] = new_editor
+            self.pattern.SetValue = lambda value, **_: setattr(self.pattern, 'Value', value)
+        self.pattern.SetValue = replace_editor
+        result = self.bridge._send(self.name, 'reply')
+        self.assertEqual(result['status'], 'not_sent')
+        self.assertIn('草稿变化', result['note'])
+        self.assertEqual(self.root.children[1].value, 'owner typed into replacement')
+        self.post.assert_not_called()
+
+    def test_replaced_hwnd_is_not_sent_to(self):
+        self.stub_snapshot_and_echo()
+        def edit(text, **_):
+            self.pattern.Value = text
+            self.window['hwnd'] = 8
+        self.pattern.SetValue = edit
+        result = self.bridge._send(self.name, 'reply')
+        self.assertEqual(result['status'], 'not_sent')
+        self.assertIn('窗口已更换', result['note'])
+        self.post.assert_not_called()
 
 
 def benchmark():

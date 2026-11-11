@@ -69,6 +69,7 @@ export class ConversationContext {
       timeSource: observationMode === 'baseline' ? 'observed' : event.platformTimeVerified === true && timestamp(event.platformTime, null) !== null ? 'platform' : 'received',
       sender: senderEvidence(event.sender), role, text: text.slice(0, this.maxChars), textTruncated: text.length > this.maxChars,
       ...(event.inputModality?.kind==='platform_transcript'&&event.inputModality.provenance==='wechat_accessibility'?{inputModality:{kind:'platform_transcript',provenance:'wechat_accessibility',uncertain:true,durationSeconds:event.inputModality.durationSeconds}}:{}),
+      ...(event.inputModality?.kind==='asr_transcript'&&event.inputModality.provenance==='bound_audio'?{inputModality:{kind:'asr_transcript',provenance:'bound_audio',uncertain:event.inputModality.uncertain!==false}}:{}),
       quote, attachments: Array.isArray(event.attachments) ? event.attachments.slice(0, 10).map(item => ({
         kind: typeof item.kind === 'string' ? item.kind.slice(0, 30) : 'unknown',
         resourceId: typeof item.resourceId === 'string' ? item.resourceId.slice(0, 256) : null,

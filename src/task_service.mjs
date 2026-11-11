@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto';
+import {conversationalReminder} from './conversational_reminder.mjs';
 
 // No timers, transport, network, or file I/O: commit each transition via Store.change.
 const owner = actor => actor?.isOwner === true;
@@ -34,7 +35,7 @@ function validate(state,options) {
   return null;
 }
 
-export function parseTaskIntent(text,{timeZone='Asia/Shanghai'}={}) {
+export function parseTaskIntent(text,{timeZone='Asia/Shanghai',now=Date.now()}={}) {
   const body=bodyOf(text);
   if(/^(?:提醒列表|查看提醒|有哪些提醒)[？?。]?$/u.test(body)) return {type:'list'};
   let match=body.match(/^(?:取消提醒|删除提醒)[：:\s]*([A-Za-z0-9_-]+)[。]?$/u);
@@ -42,7 +43,8 @@ export function parseTaskIntent(text,{timeZone='Asia/Shanghai'}={}) {
   match=body.match(/^(?:查资料|搜索一下|搜索|查一下)[：:\s]*(.+)$/u);
   if(match) return {type:'search',query:match[1].trim().slice(0,500)};
   if(/^(?:总结|回顾|概括)(?:一下)?(?:刚才|这段|本次|今天|昨天|最近|过去|讨论|群聊)/u.test(body)) return {type:'summary',request:body};
-  // Relative dates are deliberately clarified; no implicit tomorrow/time-of-day guess.
+  const conversational = conversationalReminder(body,now,timeZone);
+  if (conversational) return conversational;
   match=body.match(/^(?:在\s*)?(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(Z|[+-]\d{2}:\d{2})?\s*(?:提醒(?:我|大家|本群)?)[：:\s]*(.+)$/u);
   if(!match) match=body.match(/^提醒(?:我|大家|本群)?[：:\s]*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(Z|[+-]\d{2}:\d{2})?[，,：:\s]+(.+)$/u);
   if(match) {

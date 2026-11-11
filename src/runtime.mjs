@@ -19,7 +19,10 @@ export async function createRuntime({root=DEPLOYMENT_ROOT,codec,demo=false,state
  };
  // setup transport handlers return a transport synchronously; verify on use.
  const factory=extensions.has('transport')?()=>{const value=extensions.handlers.get('transport').call({root});if(value?.then||!value?.start||!value?.call||!value?.kill)throw Error('transport_contract_invalid');return value;}:transportFactory;
- const media=createMediaService({...(extensions.has('media')?{resolveAttachment:args=>extensions.call('media',args)}:{}),...(extensions.has('asr')?{asr:args=>extensions.call('asr',args)}:{})});
+ const media=createMediaService({
+   ...(extensions.has('media') ? {resolveAttachment:args=>extensions.call('media',args)} : {}),
+   ...(extensions.has('asr') ? {asr:args=>extensions.call('asr',args), audioTimeoutMs:30000} : {}),
+ });
  const voice={status:async()=>({ready:false,available:extensions.has('tts'),audioFile:false,voiceBubble:false,reason:extensions.has('tts')?'transport_unsupported':'unsupported'}),generate:args=>extensions.has('tts')?extensions.call('tts',args):Promise.resolve({kind:'text',text:args.text,reason:'unsupported'})};
  const core=new Companion({root,codec,model,search,transportFactory:factory,media,voice,extensions,stateFile});
  core.demo=demo;

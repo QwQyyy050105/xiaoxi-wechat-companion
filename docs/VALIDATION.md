@@ -1,5 +1,11 @@
 # Validation record
 
+## 语音收信与本机识别（2026-11-11）
+
+在 Windows、Node 20.16.0 上，通过实际面板的本地音频接口识别了五段由 Microsoft Huihui Desktop 合成的普通话 WAV。使用 Vosk 小型中文模型时，“今天天气怎么样”“明天上午十点开会”“请关上窗户”“你好”四句完整识别正确；“小汐，晚上好”被听成“小心晚上好”。同样五段通过 Windows 内置中文识别器仅“你好”完整正确。一段公开的人声英文录音“one two three”通过 Windows 英文识别获得“123”。上述小样本用于验证真实引擎和面板连通，不能代表自然群语音准确率。[英文录音来源](https://github.com/Uberi/speech_recognition/blob/master/examples/english.wav)
+
+`test/voice_input.test.mjs` 覆盖文件格式、面板身份、附件来源、停止识别、迟到转写和群回复去重。其中群音频句柄和模型使用合成夹具。微信 4.1.15.56 的程序文件含聊天语音自动转写设置的名称。本轮没有验证真实微信账号已开启该设置或真实群语音自动送达。[功能和验收步骤](VOICE_INPUT.md)
+
 ## 中断后的群回复与提醒（2026-11-11）
 
 在下节同一 Windows 导出目录加入本次发送恢复改动，再运行 `npm test`，442 项通过，无跳过。测试在两组虚构会话分别持久化 `prepared` 与 `sending` 后重建客户端，核对只有结果不明的会话暂停。另覆盖改群设置时发生中断、重新连接、主人手动恢复、旧版提醒已确认本机气泡而发件记录尚未更新的情况。恢复过程没有重发旧消息。标准发布扫描通过。此轮未操作微信窗口或验证真实设备的前台焦点。
@@ -55,6 +61,12 @@ Ignored evidence files are under `temp/native_isolation_node.tap`, `temp/native_
 - A synthetic compatible API 503 followed by success exercises the core/provider/send path with the owner model and output-token field unchanged. Safe malformed JSON/SSE codes remain redacted through local HTTP, model state and events; upstream bodies and stderr are not persisted.
 - Explicit capacity, busy, quota and HTTP500 failures remain recoverable; a known authentication failure cannot be overwritten by a later network notice or configured deadline.
 - Saving validated owner model settings clears the previous backend's failure state without a cloud call or changing conversation authorization. Mock/demo, actual plugin bootstrap, privacy checks and configurable model/search paths remain covered by the complete suite.
+
+## 群提醒和后台发送
+
+运行 `npm test -- --test-name-pattern="spoken reminder enters"` 可分别回放五种输入，覆盖相对分钟、下周一、明天下午三点半、后天的 24 小时时刻和今晚一刻。每个用例独立启动聊天核心，检查待确认任务的事项、北京时间和目标群，再确认任务、推进时钟，并核对同一任务只产生一次发信。模拟时钟与传输用于重放，原生微信可用性需要在部署设备上另行核验。
+
+群窗口可读但上次发送结果未知时，面板会显示暂停回复。可以在核对草稿后只恢复这个群；恢复时会先读取当前消息作为基线。运行 `npm test -- --test-name-pattern="readable group"` 可重放同时存在一个可读群和一个窗口缺失的场景。原生测试另覆盖后台定向回车、窗口更换、手动草稿和不确定发送。后台回执与手机收信是两个独立的验收点。
 
 ## Boundaries
 

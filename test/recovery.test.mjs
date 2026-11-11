@@ -162,7 +162,7 @@ test('automatic and manual reconnect retain ambiguous-send suspension until the 
  },onSend:()=>{sends++;}});
  core.schedule=()=>{};core.running=true;core.modelState={stage:'ready'};core.suspended.add(target.id);
  await core.connect();assert.equal(core.suspended.has(target.id),true);assert.ok(opened.every(value=>value===false));
- await core.tick();assert.equal(sends,0);assert.equal(core.store.value.inbox.length,0);assert.equal(core.targetStates[target.id].stage,'error');
+ await core.tick();assert.equal(sends,0);assert.equal(core.store.value.inbox.length,0);assert.equal(core.targetStates[target.id].stage,'paused');
  await core.bridge.stop();core.bridge=null;
  await core.connect(true);assert.equal(core.suspended.has(target.id),true);assert.ok(opened.slice(-2).every(value=>value===true));
  await core.dispatch('target.acknowledge',{id:target.id});assert.equal(core.suspended.has(target.id),false);assert.equal(sends,0);

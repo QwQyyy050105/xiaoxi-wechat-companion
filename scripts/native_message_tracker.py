@@ -18,7 +18,11 @@ def voice_update(old, new):
     a = re.match(r'^语音(\d{1,3})["″”]?秒', old.get('text', ''))
     b = re.match(r'^语音(\d{1,3})["″”]?秒', new.get('text', ''))
     pending = old.get('text', '')[a.end():].strip() if a else None
-    return bool(a and b and a.group(1) == b.group(1) and pending in ('', '未播放', '已播放', '未读', '已读', '转文字中', '正在转文字', '转换中'))
+    if not a or not b or a.group(1) != b.group(1):
+        return False
+    status = re.sub(r'[,，]\s*', '，', pending.rstrip('.。…').strip())
+    return status in ('', '未播放', '已播放', '未读', '已读', '转文字', '转文字中', '转换文字中', '正在转文字', '转换中',
+                      '转文字失败', '转换文字失败', '转文字失败，请重试', '无法转文字', '暂不支持转文字')
 
 
 class NativeMessageTracker:

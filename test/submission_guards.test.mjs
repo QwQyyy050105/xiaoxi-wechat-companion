@@ -143,7 +143,7 @@ test('unknown quarantine survives a fresh core and default auto-start until expl
   assert.equal(restarted.suspended.has(target.id), true);
   assert.equal(restarted.store.value.targets.find(item => item.id === target.id).quarantined, true);
   await restarted.tick();
-  assert.equal(restarted.targetStates[target.id].stage, 'error');
+  assert.equal(restarted.targetStates[target.id].stage, 'paused');
   assert.equal(sent.length, 0);
   await restarted.dispatch('target.acknowledge', {id: target.id});
   assert.equal(restarted.suspended.has(target.id), false);
