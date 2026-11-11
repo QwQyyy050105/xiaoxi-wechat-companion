@@ -1,20 +1,20 @@
-# Xiaoxi WeChat Companion
+# Xiaoxi WeChat Companion · 小汐
 
-A local AI companion template with editable personality, conversation controls, a browser/desktop panel, and an **experimental Windows WeChat group adapter**. This repository starts with **no account, no authorized conversations, no cloud calls**. It is an independent template, not an official WeChat bot service.
+小汐是一个本地聊天伙伴模板。你可以在面板里改人格、换模型、选择允许接话的群。**刚安装时不绑定账号、不监听群、不调用云模型**，可以直接试聊。接入自己的微信群使用实验性的 Windows 桌面适配器，需要匹配的微信版本。
 
-先看 [三种模板怎么选](docs/CHOOSING_A_TEMPLATE.md)、[小白可以直接复制的提问](docs/BEGINNER_PROMPTS.md) 和 [可移植性说明](docs/PORTABILITY.md)。这三个仓库各自部署；本仓库专注微信端，不能继承 QQ 的协议接入能力。
+第一次部署或换电脑，可跟着 [小汐换机与接入验收](docs/DEPLOYMENT_GUIDE.md) 先跑通一次本地试聊，再接模型和 Windows 微信。选项目或需要提问示例时，可读 [三个模板怎么选](docs/CHOOSING_A_TEMPLATE.md) 和 [新手提问示例](docs/BEGINNER_PROMPTS.md)。
+
+要改代码，先看[桌面接收器、会话和模型的代码入口](docs/CODE_MAP.md)，其中列有各环节对应的离线用例。
 
 ## 先运行，不必准备账号或 API Key
 
-需要 Node.js 20.16 或更高版本；建议当前受维护的 LTS。普通演示和浏览器面板可在 Windows/macOS/Linux 运行。原生微信收发只支持下文列出的 Windows 实验构建。
+浏览器面板需要 Node.js 20.16 或更新版本，Windows、macOS 和 Linux 均可使用。以下命令安装浏览器版。使用 Electron 桌面窗口需要 Node.js 22.12 或更新版本，安装方式见 [选择安装体积](docs/PORTABILITY.md#选择安装体积)。
 
 ```sh
-npm ci
+npm ci --omit=optional
 npm run init
 npm run demo
 ```
-
-只需要浏览器面板和核心聊天时，可以把安装命令换为 `npm ci --omit=optional`。精简模式省略Electron 桌面外壳；具体能力差异与恢复方法见 [安装体积选择](docs/PORTABILITY.md#选择安装体积)。完整开发测试使用标准安装。
 
 打开命令行显示的 `http://127.0.0.1:8765`，在“本地试聊”发一句话。Mock 会明确标注“本机演示”，不会假装调用了模型或接通微信。按 Ctrl+C 关闭。端口占用可用 `npm run demo -- --port 8766`。
 

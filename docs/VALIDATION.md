@@ -1,5 +1,21 @@
 # Validation record
 
+## 中断后的群回复与提醒（2026-11-11）
+
+在下节同一 Windows 导出目录加入本次发送恢复改动，再运行 `npm test`，442 项通过，无跳过。测试在两组虚构会话分别持久化 `prepared` 与 `sending` 后重建客户端，核对只有结果不明的会话暂停。另覆盖改群设置时发生中断、重新连接、主人手动恢复、旧版提醒已确认本机气泡而发件记录尚未更新的情况。恢复过程没有重发旧消息。标准发布扫描通过。此轮未操作微信窗口或验证真实设备的前台焦点。
+
+## 换机与离线启动验收（2026-11-11）
+
+环境为 Windows x64 10.0.26300、Node 20.16.0、npm 10.8.1、Python 3.12.2。从公开基线 `de9d323` 导出到含中文和空格的新目录，加入本轮入口和文档修改。使用仓库内的空配置、临时目录和 Python 虚拟环境。
+
+| 实际操作 | 结果 |
+| --- | --- |
+| 从仓库外运行 `npm --prefix "$repo" run init`、`npm --prefix "$repo" run demo -- --smoke`、`npm --prefix "$repo" run doctor -- --json` | 部署文件和演示聊天写入预期仓库，调用者所在目录没有生成配置或数据。Mock 回答成功，云调用与微信发送均为零。诊断显示 Mock、零会话。 |
+| `npm test`、`python -B scripts/test_native.py` | 首次没有 psutil 时，Node 有 3 项原生进程用例跳过。按 requirements-desktop.txt 安装到虚拟环境并给 Node 测试指定其解释器后，439 项 Node 和 78 项 Python 用例全部通过，无跳过。正式面板拒绝 `--smoke` 的回归用例使用虚构部署文件。 |
+| `npm ci --omit=optional`、`npm run demo -- --smoke`、`Start_Panel.cmd --check`、`npm run check:release` | 精简安装、浏览器试聊、Windows 启动条件检查和标准发布扫描通过；扫描使用仓库自带规则。 |
+
+这轮在 Windows 执行。Electron 桌面启动、macOS/Linux 本机运行、实际模型计费调用和真实微信送达均未在本轮验证。
+
 ## Lightweight receiver coverage — 2026-10-27
 
 The native receiver now reuses structural controls only within one verified read. It reacquires them after an unread jump, does not expand message/quotation/media children during ordinary row enumeration, and retains complete diagnostic expansion. Tests cover delayed voice text, viewport replacement, duplicate controls, bounded traversal and unchanged message ordering.

@@ -48,7 +48,7 @@ test('a removed approved group can be restored only under its registered id',asy
 test('crash recovery skips unfinished input and quarantines ambiguous outbox without resending',()=>{
  const state={inbox:[{status:'queued'},{status:'generating'},{status:'completed'}],outbox:[{status:'prepared'},{status:'sending'},{status:'local_echo'}]};
  assert.equal(recoverInterrupted(state),4);assert.deepEqual(state.inbox.map(x=>x.status),['skipped','skipped','completed']);
- assert.deepEqual(state.outbox.map(x=>x.status),['unknown','unknown','local_echo']);assert.equal(recoverInterrupted(state),0);
+ assert.deepEqual(state.outbox.map(x=>x.status),['not_sent','unknown','local_echo']);assert.equal(recoverInterrupted(state),0);
 });
 function fixture(t,model){
  const root=fs.mkdtempSync(path.resolve('temp/core_test_'));fs.mkdirSync(path.join(root,'temp'));
@@ -154,7 +154,7 @@ async function waitFor(predicate){
   await new Promise(resolve=>setTimeout(resolve,5));
  }
 }
-test('automatic reconnect retains ambiguous-send suspension until explicit reconnect',async t=>{
+test('automatic and manual reconnect retain ambiguous-send suspension until the owner checks that group',async t=>{
  const {core}=fixture(t,async()=>({text:'不应自动发出'}));let sends=0;const opened=[];
  core.transportFactory=fakeTransportFactory({messages:(command,fields)=>{
   if(command==='open'){opened.push(fields.allowForeground);return [msg('baseline')];}
@@ -164,7 +164,8 @@ test('automatic reconnect retains ambiguous-send suspension until explicit recon
  await core.connect();assert.equal(core.suspended.has(target.id),true);assert.ok(opened.every(value=>value===false));
  await core.tick();assert.equal(sends,0);assert.equal(core.store.value.inbox.length,0);assert.equal(core.targetStates[target.id].stage,'error');
  await core.bridge.stop();core.bridge=null;
- await core.connect(true);assert.equal(core.suspended.has(target.id),false);assert.ok(opened.slice(-2).every(value=>value===true));
+ await core.connect(true);assert.equal(core.suspended.has(target.id),true);assert.ok(opened.slice(-2).every(value=>value===true));
+ await core.dispatch('target.acknowledge',{id:target.id});assert.equal(core.suspended.has(target.id),false);assert.equal(sends,0);
 });
 test('a late aborted generation releases its slot for fresh work after stop and start',async t=>{
  let finishOld,modelCalls=0;const sent=[];

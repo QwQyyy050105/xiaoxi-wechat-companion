@@ -166,3 +166,43 @@ test('legacy persisted unknown receipts acquire quarantine during migration', as
   assert.equal(restored.suspended.has(target.id), true);
   assert.equal(restored.store.value.targets.find(item => item.id === target.id).quarantined, true);
 });
+
+test('reopening recovers the last durable submission stage independently for each group', async t => {
+  const {core, make, sent} = coreFixture(t);
+  const [first, second] = core.store.value.targets;
+  const a = core.sessionFor(first.id).id, b = core.sessionFor(second.id).id;
+  core.store.change(state => {
+    for (const target of state.targets) target.quarantined = false;
+    state.outbox.push({id:'first', sessionId:a, status:'prepared'}, {id:'second', sessionId:b, status:'sending'});
+  });
+  const restarted = make();
+  assert.deepEqual(restarted.store.value.outbox.map(row => row.status), ['not_sent', 'unknown']);
+  assert.equal(restarted.suspended.has(first.id), false);
+  assert.equal(restarted.suspended.has(second.id), true);
+  await restarted.start();
+  await restarted.dispatch('target.acknowledge', {id:second.id});
+  assert.deepEqual(sent, []);
+  assert.equal(make().suspended.has(second.id), false);
+});
+
+test('saving group settings while a submission is interrupted keeps its new quarantine', async t => {
+  const {core, make, sent} = coreFixture(t);
+  const {target} = prepared(core);
+  await core.dispatch('target.save', {...target, mode:'observe'});
+  assert.equal(core.suspended.has(target.id), true);
+  assert.equal(make().suspended.has(target.id), true);
+  assert.deepEqual(sent, []);
+});
+
+test('restart reconciles unsent reminders and receipts saved by the older two-write scheduler', t => {
+  const {core, make} = coreFixture(t);
+  const target = core.store.value.targets[0], sessionId = core.sessionFor(target.id).id;
+  core.store.change(state => {
+    state.tasks.push({id:'one', sessionId, status:'claimed'}, {id:'two', sessionId, status:'local_echo'});
+    state.outbox.push({id:'a', taskId:'one', sessionId, status:'prepared'}, {id:'b', taskId:'two', sessionId, status:'sending'});
+  });
+  const restored = make();
+  assert.deepEqual(restored.store.value.outbox.map(row => row.status), ['not_sent','local_echo']);
+  assert.deepEqual(restored.store.value.tasks.map(row => row.status), ['not_sent','local_echo']);
+  assert.equal(restored.suspended.has(target.id), false);
+});

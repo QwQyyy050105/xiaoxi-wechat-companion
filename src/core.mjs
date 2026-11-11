@@ -139,7 +139,7 @@ export class Companion extends EventEmitter {
     }catch(error){if(!abort.signal.aborted){const health=this.modelHealth.snapshot();this.modelState={stage:'error',message:modelHealthMessage(health),errorCode:error.code??'model_generation_failed',actionRequired:health.actionRequired};this.event('AI 自检未通过：'+(error.code??'model_generation_failed'));}throw error;}
     finally{this.controllers.delete(key);this.update();}
   }
-  async start({acknowledgeUnknown=false}={}){
+  async start(){
     if(this.stopping)await this.stopping;
     if(this.running)return;
     this.running=true;const generation=++this.generation;this.connection={stage:'connecting',account:deployment.account.displayName,message:'检查微信账号与兼容版本'};this.update();
@@ -147,13 +147,13 @@ export class Companion extends EventEmitter {
     // Local platform readiness must not wait for a cloud self-check.
     // New input verifies the configured provider; manual self-check stays explicit.
     if(this.modelState.stage==='unchecked'){this.modelState={stage:'unchecked',message:'当前模型尚未核验；新问题到来时尝试，或手动点击测试 AI。'};this.update();}
-    if(this.running&&generation===this.generation)await this.connect(true,{acknowledgeUnknown});
+    if(this.running&&generation===this.generation)await this.connect(true);
   }
   schedule(ms){clearTimeout(this.timer);if(this.running)this.timer=setTimeout(()=>{void this.tick();},ms);}
-  async connect(allowWindowOpen=false,{acknowledgeUnknown=allowWindowOpen}={}){
+  async connect(allowWindowOpen=false){
     if(!this.running)return;if(this.attempting){this.schedule(1000);return;}this.attempting=true;const generation=this.generation;let localBridge;
     try{
-      this.gate.clear();this.ownIds.clear();this.invalidateAll('重新连接');if(acknowledgeUnknown){this.suspended.clear();this.store.change(s=>{for(const target of s.targets)target.quarantined=false;});}
+      this.gate.clear();this.ownIds.clear();this.invalidateAll('重新连接');
       const targets=filterAuthorizedWechatTargets(this.store.value.targets,{enabledOnly:true});
       if(!targets.length)throw Error('没有启用的授权会话；请在本机配置会话并启用');
       localBridge=this.transportFactory();this.bridge=localBridge;localBridge.start();
@@ -188,7 +188,7 @@ export class Companion extends EventEmitter {
           this.targetStates[target.id]={...this.targetStates[target.id],stage:observed.gap?'gap':'listening',message:observed.gap?'可见消息不连续，已重新建立基线，未补发':snapshot.draft?'监听中；有手动草稿，发送将暂停':'监听中',lastRead:now()};
           const deferred=this.store.value.outbox.find(x=>x.sessionId===this.sessionFor(target.id)?.id&&x.status==='deferred');
           if(deferred){this.targetStates[target.id].stage='waiting_send';this.targetStates[target.id].message=deferred.note;}
-          if(this.suspended.has(target.id)){this.targetStates[target.id].stage='error';this.targetStates[target.id].message='上次发送结果未确认，已暂停回复；核对微信后重新连接';}
+          if(this.suspended.has(target.id)){this.targetStates[target.id].stage='error';this.targetStates[target.id].message='上次发送结果未确认；请核对微信群里的消息和草稿，在会话管理恢复本群';}
           else for(const message of observed.messages){
             const ownText=this.store.value.outbox.some(x=>x.sessionId===this.sessionFor(target.id)?.id&&x.text===message.text&&Date.now()-Date.parse(x.createdAt)<180000);
             if(!this.ownIds.has(message.id)&&!ownText)this.ingest(target,message,snapshot);
@@ -426,7 +426,15 @@ export class Companion extends EventEmitter {
   recordDelivery(target,sessionId,out,result,event){
     for(const id of result.ids||[])this.ownIds.add(id);
     if(this.ownIds.size>1000)this.ownIds=new Set([...this.ownIds].slice(-500));
-    this.store.change(s=>{Object.assign(s.outbox.find(x=>x.id===out.id),{status:result.status,note:result.note});if(result.status==='local_echo')s.sessions.find(x=>x.id===sessionId).messages.push({id:out.id,role:'assistant',text:out.text,createdAt:now(),status:'local_echo'});});
+    this.store.change(s=>{
+      Object.assign(s.outbox.find(x=>x.id===out.id),{status:result.status,note:result.note});
+      if (out.taskId) settleReminder(s,out.taskId,{attemptId:out.attemptId,status:result.status,now:this.nowMs()});
+      if (result.status==='unknown') {
+        const current=s.targets.find(x=>x.id===target.id);
+        if(current) current.quarantined=true;
+      }
+      if(result.status==='local_echo')s.sessions.find(x=>x.id===sessionId).messages.push({id:out.id,role:'assistant',text:out.text,createdAt:now(),status:'local_echo'});
+    });
     if(result.status==='local_echo'&&(out.contextGeneration===undefined||out.contextGeneration===this.context.generation(sessionId))&&(out.epoch===undefined||out.epoch===this.store.session(sessionId)?.epoch)){
       this.context.observe(sessionId,{id:out.id,sourceKey:out.id,text:out.text,generation:out.contextGeneration,receivedAt:this.nowMs(),role:'assistant',status:'local_echo',inReplyToSourceKey:event?.sourceKey});
       this.policy.noteReply(sessionId,event||{sender:{evidence:'unknown'}},{confirmed:true,generation:this.context.generation(sessionId),nowMs:this.nowMs(),replyText:out.text,replySourceKey:out.id});
@@ -435,7 +443,7 @@ export class Companion extends EventEmitter {
     }
     if(out.kind==='proactive'){this.policy.recordProactive(sessionId,{outboxId:out.id,status:result.status,nowMs:this.nowMs()});this.savePolicy(sessionId);}
     this.targetStates[target.id]={...this.targetStates[target.id],lastReply:now(),lastOutcome:result.status==='local_echo'?'后台发送，本机气泡已确认':result.status==='not_sent'?'本条未发送：'+result.note:'发送结果未确认；不会自动重发'};
-    if(result.status==='unknown'){this.suspended.add(target.id);this.store.change(s=>{const current=s.targets.find(x=>x.id===target.id);if(current)current.quarantined=true;});this.invalidateSession(sessionId,'发送结果未确认');this.event(`${target.name}：${result.note}；已暂停该会话回复`);}
+    if(result.status==='unknown'){this.suspended.add(target.id);this.invalidateSession(sessionId,'发送结果未确认');this.event(`${target.name}：${result.note}；已暂停该会话回复`);}
     else if(result.status==='not_sent')this.event(`${target.name}：本条未发送，${result.note}`);
   }
   async deliver(target,out,generation,{retryMs=3000,maxWaitMs=180000,signal}={}){
@@ -638,11 +646,10 @@ export class Companion extends EventEmitter {
         let claimed;
         try{
           this.store.change(s=>{claimed=claimReminder(s,task.id,{now:this.nowMs()});});if(!claimed.ok)continue;
-          const out={id:uid(),sessionId:session.id,epoch:session.epoch,contextGeneration:turn.contextGeneration,text:`提醒：${task.text}`,createdAt:now(),status:'prepared',kind:'reminder',taskId:task.id};
+          const out={id:uid(),sessionId:session.id,epoch:session.epoch,contextGeneration:turn.contextGeneration,text:`提醒：${task.text}`,createdAt:now(),status:'prepared',kind:'reminder',taskId:task.id,attemptId:claimed.task.attemptId};
           this.store.change(s=>s.outbox.push(out));
           const result=await this.deliver(target,out,generation,{signal:controller.signal,maxWaitMs:Math.max(1,60000-(this.nowMs()-Date.parse(task.dueAt)))});
           if(!result)continue;
-          this.store.change(s=>settleReminder(s,task.id,{attemptId:claimed.task.attemptId,status:result.status,now:this.nowMs()}));
           this.recordDelivery(target,session.id,out,result);
         }finally{
           if(this.controllers.get(session.id)===controller)this.controllers.delete(session.id);
@@ -667,6 +674,7 @@ export class Companion extends EventEmitter {
       // Kill pending native work first: stopping must not wait behind a slow UIA call.
       const bridge=this.bridge;this.bridge=null;await bridge?.kill();
       this.gate.clear();this.store.change(s=>{recoverInterrupted(s);recoverTasks(s,{now:this.nowMs()});});
+      for(const target of this.store.value.targets)if(target.quarantined)this.suspended.add(target.id);
       this.connection={stage:'stopped',account:deployment.account.displayName,message:'监听已停止，兼容守护进程将恢复开关'};this.update();
     })();
     this.stopping=task;
@@ -733,12 +741,13 @@ export class Companion extends EventEmitter {
       if(typeof p.name!=='string'||!p.name.trim()||p.name.length>100||!['group','contact'].includes(p.kind)||!['mentions','observe','all'].includes(p.mode)||p.kind==='group'&&p.mode==='all')throw Error('会话配置无效');
       const idleMs=p.participation?.idleMs??180000,maxMs=p.participation?.maxMs??1800000;
       if(!Number.isInteger(idleMs)||idleMs<10000||idleMs>1800000||!Number.isInteger(maxMs)||maxMs<idleMs||maxMs>7200000)throw Error('participation_invalid');
-      const previous=this.store.value.targets.find(x=>x.id===p.id);
-      const same=previous&&previous.name===p.name.trim()&&previous.kind===p.kind;
       const id=p.id;if(this.store.value.targets.some(x=>x.id!==p.id&&x.name===p.name.trim()))throw Error('显示名重复，请先在微信设置唯一备注');
       const style=['natural','concise','detailed'].includes(p.preferences?.style)?p.preferences.style:'natural';
       const proactive={enabled:p.proactive?.enabled===true,ownerApproved:p.proactive?.enabled===true,quietHours:{start:'23:00',end:'08:00'},maxPerDay:3,minIntervalMs:1200000,utcOffsetMinutes:480};
-      await this.stop();this.store.change(s=>{const row={id,name:p.name.trim(),kind:p.kind,mode:p.mode,enabled:!!p.enabled,paused:same?!!previous.paused:false,quarantined:same?!!previous.quarantined:false,proactive,...(previous?.wechatPeerId?{wechatPeerId:previous.wechatPeerId}:{}),participation:{idleMs,maxMs},preferences:{style,splitReplies:p.preferences?.splitReplies===true},...(same&&previous.windowBinding?{windowBinding:previous.windowBinding}:{})};const index=s.targets.findIndex(x=>x.id===p.id);if(index>=0)s.targets[index]=row;else s.targets.push(row);});this.ensureSessions();
+      await this.stop();
+      const previous=this.store.value.targets.find(x=>x.id===p.id);
+      const same=previous&&previous.name===p.name.trim()&&previous.kind===p.kind;
+      this.store.change(s=>{const row={id,name:p.name.trim(),kind:p.kind,mode:p.mode,enabled:!!p.enabled,paused:same?!!previous.paused:false,quarantined:same?!!previous.quarantined:false,proactive,...(previous?.wechatPeerId?{wechatPeerId:previous.wechatPeerId}:{}),participation:{idleMs,maxMs},preferences:{style,splitReplies:p.preferences?.splitReplies===true},...(same&&previous.windowBinding?{windowBinding:previous.windowBinding}:{})};const index=s.targets.findIndex(x=>x.id===p.id);if(index>=0)s.targets[index]=row;else s.targets.push(row);});this.ensureSessions();
       if(proactive.enabled){this.policy.resumeProactive(this.sessionFor(id).id,{ownerApproved:true});this.savePolicy(this.sessionFor(id).id);}
       this.update();return true;
     }

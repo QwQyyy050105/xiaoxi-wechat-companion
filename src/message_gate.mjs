@@ -32,7 +32,24 @@ export function shouldReply(target,message){
 export function recoverInterrupted(state){
   let count=0;
   for(const row of state.inbox)if(['queued','generating'].includes(row.status)){row.status='skipped';row.reason='上次运行中断，未自动补发';count++;}
-  for(const row of state.outbox)if(['prepared','sending'].includes(row.status)){row.status='unknown';row.note='上次运行中断，发送结果未知，不自动重试';count++;}
-  for(const row of state.outbox)if(row.status==='deferred'){row.status='not_sent';row.note='等待期间停止运行，本条未发送且不补发';count++;}
+  for (const row of state.outbox) {
+    if (row.status === 'prepared' || row.status === 'deferred') {
+      row.note = row.status === 'prepared' ? '提交微信前中断，本条未发送且不补发' : '等待期间停止运行，本条未发送且不补发';
+      row.status = 'not_sent';
+    } else if (row.status === 'sending') {
+      // Older versions persisted a reminder's final receipt before its outbox row.
+      const task = row.taskId && state.tasks?.find(t => t.id === row.taskId && t.sessionId === row.sessionId && (!row.attemptId || row.attemptId === t.attemptId));
+      row.status = ['local_echo', 'not_sent'].includes(task?.status) ? task.status : 'unknown';
+      row.note = row.status === 'unknown' ? '微信发送期间中断，结果未知，不自动重试' : '已从本机提醒回执恢复';
+      if (row.status === 'unknown') {
+        const session = state.sessions?.find(s => s.id === row.sessionId && s.channel === 'desktop_wechat');
+        const target = session && state.targets?.find(t => t.id === session.peerId);
+        if (target) target.quarantined = true;
+      }
+    } else {
+      continue;
+    }
+    count++;
+  }
   return count;
 }

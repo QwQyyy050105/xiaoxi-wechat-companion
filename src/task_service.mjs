@@ -96,7 +96,11 @@ export function queryTasks(state,{sessionId}={}) { return (state.tasks ?? []).fi
 export function recoverTasks(state,{now}={}) {
   const recovered=[]; const ms=Date.parse(stamp(now));
   for(const row of state.tasks ?? []) {
-    if(['claimed','sending'].includes(row.status)) { row.status='unknown'; row.reason='interrupted_after_claim'; }
+    if(['claimed','sending'].includes(row.status)) {
+      const receipt=state.outbox?.find(out=>out.taskId===row.id && out.sessionId===row.sessionId && (!out.attemptId || out.attemptId===row.attemptId));
+      row.status=['local_echo','not_sent'].includes(receipt?.status)?receipt.status:'unknown';
+      row.reason=row.status==='unknown'?'interrupted_after_claim':row.status==='local_echo'?'local_echo_only':'not_sent';
+    }
     else if(row.status==='scheduled' && Date.parse(row.dueAt)<=ms) { row.status='missed'; row.reason='offline_at_due_time'; }
     else continue;
     row.updatedAt=stamp(now); recovered.push(row.id);

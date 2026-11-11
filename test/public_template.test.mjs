@@ -19,6 +19,18 @@ const config=()=>({schemaVersion:1,account:{},character:{id:'xiaoxi',name:'å°æ±
 const settings=(extra={})=>({provider:'compatible',model:'chosen-model',baseUrl:'https://model.invalid/v1',stream:false,retries:0,...extra});
 const result=text=>new Response(JSON.stringify({choices:[{message:{content:text}}]}),{headers:{'content-type':'application/json'}});
 
+test('panel refuses the offline smoke flag before loading owner extensions', t => {
+  const cwd = fixture(t);
+  const file = path.join(cwd, 'deployment.local.json');
+  saveDeployment({...config(), extensions: [{module: './plugins/missing.mjs'}]}, file);
+  const run = spawnSync(process.execPath, [path.join(root, 'scripts/cli.mjs'), 'panel', '--smoke'], {
+    cwd, encoding: 'utf8', timeout: 10000,
+    env: {...process.env, XIAOXI_CONFIG: file}
+  });
+  assert.equal(run.status, 2, run.stderr);
+  assert.match(run.stderr, /npm run demo -- --smoke/);
+});
+
 test('new deployment is empty and authorization is persisted only in the explicit owner file',t=>{
  const dir=fixture(t),file=path.join(dir,'deployment.local.json');assert.equal(loadDeployment(file).targets.length,0);assert.equal(loadDeployment(file).native.enabled,false);
  const value=config();value.targets=[{id:'team',name:'Example Team',kind:'group'}];assert.deepEqual(saveDeployment(value,file),{saved:true,restartRequired:true});assert.equal(loadDeployment(file).targets[0].name,'Example Team');
