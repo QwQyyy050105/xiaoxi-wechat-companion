@@ -111,7 +111,7 @@ function renderCapabilities(s){
   for(const feature of features){const row=el('div',undefined,'row');const title=el('div',undefined,'row-title');title.append(el('b',feature.label),el('span',featureStages[feature.status]||feature.status||'待核对','tag'));row.append(title,el('p',feature.detail||''));list.append(row);}
   const media=s.mediaCapabilities||{};const voice=s.voiceReadiness||{};
   $('media-status').textContent=media.groupCacheCandidates?(media.imageUnderstanding?'图片：实验缓存通道已连接，最多2张候选图；未绑定发言者。':'图片缓存已连接，但所选模型尚未确认支持看图。'):media.groupCacheConfigured?({awaiting_connection:'图片缓存已配置，等待授权微信连接；当前未取得图片。',model_vision_not_enabled:'图片缓存已配置，但所选模型尚未确认支持图片输入。',resource_unavailable:'图片资源读取失败；查看运行记录中的原因，当前不能看图。',awaiting_image_read:'图片缓存已配置并连接，尚未实际取得图片；需要一次读图请求验证。'}[media.nativeStatus]||'图片资源通道尚未就绪。'):'图片缓存未配置，当前没有原生图片输入。';
-  $('media-status').textContent+=' 群语音可在微信设置里开启“聊天中的语音消息自动转成文字”；小汐会读取授权群的新转写。';
+  $('media-status').textContent+=' 群里问“刚才那条语音说了什么”可核对最新气泡。在连接与状态中可查看微信的转写进度。';
   if(media.localWaveFiles===false){$('voice-recognize').disabled=true;$('voice-file-status').textContent='可用 python -B scripts/install_voice_model.py 安装普通话识别，完成后重开客户端。';}
   const reasons=(voice.blockers||[voice.reason||'status_not_checked']).map(x=>voiceReasons[x]||x).join('；');
   $('voice-status').textContent=`小汐语音回复：${voice.ready&&voice.transportSupported?'就绪，仍按目标能力判断':'关闭，继续使用文字'}。音频文件：${voice.audioFile?'已验证':'未验证'}；原生语音气泡：${voice.voiceBubble?'已验证':'未验证'}。${reasons}`;
@@ -130,7 +130,7 @@ function render(s){
     title.append(el('b',t.name),el('span',t.quarantined?'发送未确认，已隔离':!t.enabled?'未启用':t.paused?'已暂停回复':s.connection.stage==='stopped'?'已停止':r?stages[r.stage]||r.stage:'等待连接','tag'));
     row.append(title,el('p',(!t.enabled?'此会话不会被监听。':t.paused?'已暂停此会话回复，可由主人恢复。':s.connection.stage==='stopped'?'点击连接后开始监听。':r?.message||'等待检查窗口')+(r?.lastOutcome?' · '+r.lastOutcome:'')));
     if(r?.lastVoice){
-      const voiceStage={waiting_transcript:'等待微信转出文字',platform_transcript:'已读到微信转写',asr_transcript:'已识别绑定录音',audio_unavailable:'绑定录音暂未识别'};
+      const voiceStage={waiting_transcript:'等待微信转出文字',transcribing:'微信正在转文字',transcription_failed:'微信报告转写失败',platform_transcript:'已读到微信转写',asr_transcript:'已识别绑定录音',audio_unavailable:'绑定录音暂未识别'};
       row.append(el('p','最近语音 · '+(voiceStage[r.lastVoice.stage]||'待核对')+' · '+new Date(r.lastVoice.at).toLocaleTimeString()));
     }
     const actions=el('div',undefined,'actions');actions.append(button(t.paused?'恢复回复':'暂停回复',()=>call('target.pause',{id:t.id,paused:!t.paused})));

@@ -30,10 +30,12 @@ import {loadGroupProfile} from './group_profile.mjs';
 import {PublicLookupConversation} from './public_lookup_conversation.mjs';
 import {GroupMediaInput} from './group_media.mjs';
 import {normalizeNativeMedia} from './native_media.mjs';
+import {LiveVoiceReadback,wantsVoiceReadback} from './voice_readback.mjs';
 import {canTranscribeLocalWave} from './local_asr.mjs';
 import {planContextResearch,researchEvidence,PublicResearchCache} from './research_intent.mjs';
 
 const OWNER={isOwner:true};
+const VIEWPORT_HOLD_MS = 60_000;
 const reasonText={personal_memory_unavailable:'还不能可靠确认成员身份，暂不保存个人长期记忆。',shared_scope_required:'请明确这是本群共同约定；个人事实暂不保存。',not_confirmed_fact:'这句话包含转述或假设，暂不作为已确认事实保存。',temporary_state:'这更像当下感受，先不写成长期事实。',memory_not_found:'没找到当前会话的那条记忆。',memory_id_required:'请先查看记忆，再指定条目编号。',stale_epoch:'会话已经变化，请重新提交。',stale_memory_epoch:'记忆已变化，请重新提出这条候选。',stale_version:'条目已被修改，请查看最新内容后再操作。',time_not_future:'提醒时间已经过去，请提供未来的明确日期和时间。',explicit_datetime_required:'请给出完整日期和时间。',owner_required:'这项修改需要在本机客户端由主人确认。',task_already_committed:'任务已提交或结束，不能再次执行或撤销。',target_session_mismatch:'提醒目标与所属会话不一致。'};
 function checked(result){if(!result?.ok)throw Error(reasonText[result?.code]||`操作未完成：${result?.code||'未知结果'}`);return result;}
 function findShort(rows,id){const matches=rows.filter(x=>x.id===id||x.id.startsWith(id));return matches.length===1?matches[0].id:null;}
@@ -47,6 +49,7 @@ export class Companion extends EventEmitter {
     this.personaLoader=new PersonaLoader(root,{nowMs});
     const loaded=this.personaLoader.load();this.persona=loaded.persona;this.personaStatus=loaded.status;this.modelInput=null;
     this.reminderFollowups = new Map();
+    this.voiceReadbacks = new LiveVoiceReadback(nowMs);
     this.gate=new MessageGate();this.controllers=new Map();this.targetStates={};this.pending=new Map();this.processing=new Set();this.ownIds=new Set();this.suspended=new Set();this.generation=0;this.running=false;this.attempting=false;this.timer=null;this.stopping=null;
     this.weather=weather===undefined?createWeatherConversation({nowMs}):weather;
     this.publicLookup=new PublicLookupConversation({nowMs});
@@ -187,9 +190,17 @@ export class Companion extends EventEmitter {
         try{
           const snapshot=await localBridge.call('read',{group:target.name});
           if(!this.running||generation!==this.generation)break;
+          const previousState = this.targetStates[target.id];
+          if (previousState?.viewportHeldAt != null) {
+            if (this.nowMs() - previousState.viewportHeldAt >= VIEWPORT_HOLD_MS) this.gate.rooms.delete(target.id);
+            delete previousState.viewportHeldAt;
+          }
           const observed=this.gate.observe(target,snapshot);const session=this.sessionFor(target.id);
           if(observed.gap||observed.baseline){this.invalidateSession(session?.id,observed.gap?'读取出现缺口':'窗口重新建立基线',{clearContext:true});this.seedVisibleBackground(target,snapshot);}
           this.targetStates[target.id]={...this.targetStates[target.id],stage:observed.gap?'gap':'listening',message:observed.gap?'可见消息不连续，已重新建立基线，未补发':snapshot.draft?'监听中；有手动草稿，发送将暂停':'监听中',lastRead:now()};
+          if (snapshot.continuity?.unreadBeyondViewport && !observed.gap) {
+            this.targetStates[target.id].message = '已读到连续的新消息。微信仍有未读提示，窗口外的消息需跳到最新后读取';
+          }
           const deferred=this.store.value.outbox.find(x=>x.sessionId===this.sessionFor(target.id)?.id&&x.status==='deferred');
           if(deferred){this.targetStates[target.id].stage='waiting_send';this.targetStates[target.id].message=deferred.note;}
           if (this.suspended.has(target.id)) {
@@ -203,7 +214,20 @@ export class Companion extends EventEmitter {
           }
           if(target.paused){this.targetStates[target.id].stage='paused';this.targetStates[target.id].message='主人已暂停本群回复，其他群不受影响';}
           else if(session&&this.policy.state(session.id).waiting){this.targetStates[target.id].stage='waiting_input';this.targetStates[target.id].message='等待明确补充；超时不补发旧回答';}
-        }catch(error){this.gate.rooms.delete(target.id);this.invalidateSession(this.sessionFor(target.id)?.id,'读取中断',{clearContext:true});this.targetStates[target.id]={stage:'error',message:error.message};}
+        } catch (error) {
+          if (!this.running || generation !== this.generation) break;
+          const previous = this.targetStates[target.id];
+          const heldAt = previous?.viewportHeldAt ?? this.nowMs();
+          if (error.code === 'viewport_pending' && this.gate.rooms.has(target.id) && this.nowMs() - heldAt < VIEWPORT_HOLD_MS) {
+            // The native reader has verified the window and has not advanced its cursor.
+            this.targetStates[target.id] = {...previous, stage:'waiting_viewport', message:error.message, viewportHeldAt:heldAt};
+            continue;
+          }
+          if (this.gate.rooms.delete(target.id) || previous?.stage !== 'error') {
+            this.invalidateSession(this.sessionFor(target.id)?.id, '读取中断', {clearContext:true});
+          }
+          this.targetStates[target.id] = {stage:'error', message:error.message};
+        }
       }
       if(!localBridge.child)throw Error('微信连接中断，等待重新登录');
       void this.runTasks();
@@ -218,6 +242,8 @@ export class Companion extends EventEmitter {
   }
   invalidateSession(sessionId,reason,{clearContext=false,currentOnly=false,proactiveOnly=false}={}){
     if (clearContext || !proactiveOnly) this.reminderFollowups.delete(sessionId);
+    if(sessionId && clearContext)this.voiceReadbacks.clear(sessionId);
+    else if(sessionId && !proactiveOnly)this.voiceReadbacks.cancel(sessionId);
     if(!sessionId)return;
     if(!proactiveOnly)for(const job of this.audioJobs.values())if(job.sessionId===sessionId)job.controller.abort();
     if(!proactiveOnly){this.weather?.clear(sessionId);this.publicLookup.clear(sessionId);this.groupMedia.clear(sessionId);}
@@ -270,7 +296,9 @@ export class Companion extends EventEmitter {
     const session=this.sessionFor(target.id);if(!session)return;
     message=normalizeNativeMedia(message);
     if(message.inputModality?.kind==='voice_pending'){
-      this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'waiting_transcript',at:now()}};
+      this.voiceReadbacks.observe(session.id,message);
+      const stage={failed:'transcription_failed',converting:'transcribing'}[message.inputModality.stage]??'waiting_transcript';
+      this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage,at:now()}};
       void this.transcribeIncomingVoice(target,session,message,snapshot);
       return;
     }
@@ -305,6 +333,11 @@ export class Companion extends EventEmitter {
     const isText=message.klass==='mmui::ChatTextItemView'||['platform_transcript','asr_transcript'].includes(message.inputModality?.kind);
     const event=this.context.observe(session.id,{...message,role:'user',sourceKey:`${snapshot.created}/${snapshot.hwnd}/${target.id}/${message.key||message.id}`,receivedAt:this.nowMs(),sender:message.sender||{evidence:'unknown'},attachments:message.attachments||[]});
     if(!event||!isText||!event.text.trim()||event.text.length>6000)return;
+    const requestedTranscript=this.voiceReadbacks.observe(session.id,message);
+    if(requestedTranscript && this.running && target.enabled && !target.paused && target.mode!=='observe' && !this.suspended.has(target.id)){
+      this.accept(target,{...message,event,replyReason:'requested_voice_transcript',directReply:requestedTranscript,key:message.key||message.id},snapshot);
+      return;
+    }
     const previousEngagement=this.policy.state(session.id).engagement;
     const decision=this.policy.decide({...target,sessionId:session.id,authorized:true},event,this.context);
     this.latency.decisions.push({at:now(),targetId:target.id,action:decision.action,reason:decision.reason,callEvidence:decision.callEvidence??null,textLength:event.text.length});
@@ -335,7 +368,10 @@ export class Companion extends EventEmitter {
       this.savePolicy(session.id);
       const presenceOnly=decision.reason==='social_summons'&&!decision.replyContext&&!event.quote&&!event.attachments?.length;
       const summonsContinuationKey=decision.reason==='social_summons'&&previousEngagement&&!previousEngagement.interrupted&&previousEngagement.generation===event.generation?previousEngagement.lastAcceptedKey:undefined;
-      const accepted=this.accept(target,{...message,event:{...event,...(decision.replyContext?{replyContext:decision.replyContext}:{}),...(decision.engagement?{engagement:decision.engagement}:{})},replyReason:decision.reason,summonsContinuationKey,directReply:decision.clarification||(presenceOnly?'在呢':undefined),key:message.key||message.id},snapshot);
+      const readback=!message.inputModality && !event.quote && !event.attachments?.length && wantsVoiceReadback(event.text,this.policy.names)
+        ? this.voiceReadbacks.request(session.id) : null;
+      const accepted=this.accept(target,{...message,event:{...event,...(decision.replyContext?{replyContext:decision.replyContext}:{}),...(decision.engagement?{engagement:decision.engagement}:{})},replyReason:readback?'requested_voice_readback':decision.reason,summonsContinuationKey,directReply:readback?.text||decision.clarification||(presenceOnly?'在呢':undefined),key:message.key||message.id},snapshot);
+      if(accepted?.eligible)readback?.wait?.();
       // A redundant ping must not replace the pending question's reply/answer slot.
       if(accepted?.coalescedInto&&previousEngagement)this.policy.room(session.id).engagement={...previousEngagement,coalescedKeys:[...(previousEngagement.coalescedKeys??[]),event.sourceKey].slice(-30)};
       return;
@@ -398,7 +434,8 @@ export class Companion extends EventEmitter {
     });
     const availability=this.modelHealth.availability();
     const selfChecking=this.controllers.has('model_check');
-    const modelEligible=!selfChecking&&['ready','unchecked','error'].includes(this.modelState.stage)&&availability.allowed;
+    const readbackReady=!!message.directReply && ['requested_voice_readback','requested_voice_transcript'].includes(message.replyReason);
+    const modelEligible=readbackReady||!selfChecking&&['ready','unchecked','error'].includes(this.modelState.stage)&&availability.allowed;
     const eligible=!coalesced&&modelEligible&&queue.length<5;
     if(coalesced)this.latency.coalescedSummons++;
     this.store.change(s=>{
@@ -412,7 +449,7 @@ export class Companion extends EventEmitter {
         this.batchTimers.set(session.id,setTimeout(()=>{this.batchTimers.delete(session.id);void this.drain(target,session.id);},delay));
       }else void this.drain(target,session.id);
     }
-    this.update();return {id,coalescedInto:coalesced?.id??null};
+    this.update();return {id,eligible,coalescedInto:coalesced?.id??null};
   }
   async drain(target,sessionId){
     if(!this.scopedTargetSession(target,sessionId))return;
@@ -453,7 +490,8 @@ export class Companion extends EventEmitter {
     }catch(error){this.store.change(s=>{for(const i of s.inbox.filter(x=>ids.includes(x.id))){i.status=controller.signal.aborted?'skipped':'error';i.reason=controller.signal.aborted?'本轮已取消':error.message;}});if(!controller.signal.aborted)this.event(`${target.name}：${error.message}`);}
     finally{
       const finished=performance.now();
-      const timing={at:now(),requestId:item.id,sessionId,responsePath:item.directReply?(item.replyReason==='social_summons'?'presence':'clarification'):(turn.responsePath||'model_or_service'),queueMs:Math.round(turn.queueMs),answerMs:Math.round((turn.answerReadyAt??finished)-turn.startedAt),deliveryMs:turn.answerReadyAt===undefined?0:Math.round(finished-turn.answerReadyAt),totalAfterObservationMs:Math.round(turn.queueMs+finished-turn.startedAt),linkedPreviousQuestion:!!item.event.replyContext,engagedFollowup:item.event.engagement?.relation==='current_group_topic',status:this.store.value.inbox.find(row=>row.id===item.id)?.status??'unknown'};
+      const directPath={social_summons:'presence',requested_voice_readback:'voice_readback',requested_voice_transcript:'voice_followup'}[item.replyReason]??'clarification';
+      const timing={at:now(),requestId:item.id,sessionId,responsePath:item.directReply?directPath:(turn.responsePath||'model_or_service'),queueMs:Math.round(turn.queueMs),answerMs:Math.round((turn.answerReadyAt??finished)-turn.startedAt),deliveryMs:turn.answerReadyAt===undefined?0:Math.round(finished-turn.answerReadyAt),totalAfterObservationMs:Math.round(turn.queueMs+finished-turn.startedAt),linkedPreviousQuestion:!!item.event.replyContext,engagedFollowup:item.event.engagement?.relation==='current_group_topic',status:this.store.value.inbox.find(row=>row.id===item.id)?.status??'unknown'};
       if(turn.researchTiming)timing.research={...turn.researchTiming};
       if(turn.sendTiming)timing.send={...turn.sendTiming};
       this.latency.recent.push(timing);this.latency.recent=this.latency.recent.slice(-20);
@@ -584,7 +622,11 @@ export class Companion extends EventEmitter {
     if(mediaIntent.image||mediaIntent.voiceInput){
       const kind=mediaIntent.voiceInput?'audio':'image';
       const snapshot=this.context.snapshot(sessionId);const candidate=snapshot.messages.slice().reverse().find(x=>x.attachments?.some(a=>a.kind===kind));
-      if(kind==='audio'&&snapshot.messages.some(x=>x.inputModality?.kind==='platform_transcript'&&this.nowMs()-x.receivedAt<300000))return null;
+      if(kind==='audio'){
+        const latest=this.voiceReadbacks.latest(sessionId);
+        if(latest && !latest.text)return '你问的这条语音还没出文字，我还看不到它讲了什么';
+        if(latest?.text || snapshot.messages.some(x=>x.inputModality?.kind==='platform_transcript'&&this.nowMs()-x.receivedAt<300000))return null;
+      }
       if(candidate){const attachment=candidate.attachments.find(a=>a.kind===kind);const result=await this.media.analyze({sessionId,messageId:candidate.id,handle:attachment.resourceId,kind},{signal});if(result.ok)return result.uncertain?'这段语音有听不准的部分，请确认：'+result.text:result.text;}
       return kind==='image'?'这张图我这边还没取到，先在电脑微信里点开让它下载一下，再叫我看看':'这条语音还没转出文字，在微信里点一下“转文字”，我就能接着看';
     }
@@ -744,6 +786,7 @@ export class Companion extends EventEmitter {
       this.weather?.clearAll();
       this.publicLookup.clearAll();
       this.groupMedia.clear();
+      this.voiceReadbacks.clear();
       for(const timer of this.batchTimers.values())clearTimeout(timer);this.batchTimers.clear();this.context.clearAll('停止连接');this.policy.clearAll();
       // Kill pending native work first: stopping must not wait behind a slow UIA call.
       const bridge=this.bridge;this.bridge=null;await bridge?.kill();

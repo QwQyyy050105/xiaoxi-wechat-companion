@@ -35,6 +35,25 @@ class NativeMessageTracker:
         self.serial += 1
         return f'xiaoxi_native_{self.prefix}_{self.serial}'
 
+    def has_visible_append(self, name, generation, rows):
+        """Prove a visible append without advancing the cursor or moving the window."""
+        previous = self.rooms.get(name)
+        if not previous or previous['generation'] != generation or len(previous['rows']) < 2:
+            return False
+        old = previous['rows']
+        ids = [row['id'] for row in rows]
+        if len(ids) != len(set(ids)):
+            return False
+        pair = [(row['nativeId'], fingerprint(row)) for row in old[-2:]]
+        if pair[0][1] == pair[1][1] or pair[-1][0] not in ids:
+            return False
+        end = ids.index(pair[-1][0])
+        if end < 1 or end + 1 >= len(rows):
+            return False
+        matched = [(row['id'], fingerprint(row)) for row in rows[end-1:end+1]]
+        old_ids = {row['nativeId'] for row in old}
+        return matched == pair and old_ids.isdisjoint(ids[end+1:])
+
     def observe(self, name, generation, rows, unread_count=0):
         previous = self.rooms.get(name)
         old = previous['rows'] if previous and previous['generation'] == generation else []

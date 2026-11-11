@@ -171,6 +171,36 @@ class NativeReadEfficiencyTests(unittest.TestCase):
         self.assertEqual(result['messages'][-1]['text'],'new synthetic question')
         self.assertEqual(bridge.message_tracker.rooms[name]['rows'][-1]['text'],'new synthetic question')
 
+    def test_minimized_visible_append_is_received_once_while_unread_banner_remains(self):
+        bridge, name, root, messages, field, bubbles = fixture(3)
+        baseline = read_once(bridge, name, self.path)
+        notice = Control('new_notice', text='2条新消息', role='ButtonControl')
+        notice.IsEnabled = True
+        fresh = Control('fresh.chat_bubble_item_view', text='question', number=55, klass='mmui::ChatTextItemView')
+        messages.children = [*bubbles[1:],fresh,notice]
+        received = read_once(bridge, name, self.path)
+        self.assertTrue(received['continuity']['unreadBeyondViewport'])
+        self.assertEqual(received['messages'][-2]['id'],baseline['messages'][-1]['id'])
+        self.assertEqual(received['messages'][-1]['text'],'question')
+        with self.assertRaises(d.ViewportPending):
+            read_once(bridge, name, self.path)
+        bridge.checking_send = True
+        self.assertEqual(read_once(bridge,name,self.path)['messages'][-1]['id'],received['messages'][-1]['id'])
+
+    def test_unread_append_requires_two_exact_anchors_and_fresh_native_ids(self):
+        bridge, name, root, messages, field, bubbles = fixture(3)
+        read_once(bridge,name,self.path)
+        tracker = bridge.message_tracker
+        room = tracker.rooms[name]
+        rows = [dict(row,id=row['nativeId']) for row in room['rows']]
+        appended = dict(rows[-1],id='new',text='next')
+        generation = room['generation']
+        self.assertTrue(tracker.has_visible_append(name,generation,[*rows,appended]))
+        for invalid in ([rows[-1],appended], [rows[-2],dict(rows[-1],text='replaced'),appended],
+                        [*rows,dict(appended,id=rows[0]['id'])], [*rows,appended,appended]):
+            self.assertFalse(tracker.has_visible_append(name,generation,invalid))
+        self.assertFalse(tracker.has_visible_append(name,('new',),[*rows,appended]))
+
     def test_unread_jump_reacquires_changed_view_before_returning_messages(self):
         bridge, name, root, messages, field, bubbles = fixture(1)
         read_once(bridge, name, self.path)

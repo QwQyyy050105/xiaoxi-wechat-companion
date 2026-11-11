@@ -19,7 +19,9 @@ export class MessageGate {
     const fresh=rows.slice(index+1);
     for(const row of fresh)if(row.inputModality?.kind==='voice_pending')pending.set(row.id,at);
     for(const row of converted)pending.delete(row.id);
-    const messages=[...converted,...fresh];
+    const changedPending=rows.filter(row=>row.inputModality?.kind==='voice_pending'&&pending.has(row.id)&&
+      previous.ids.includes(row.id)&&!previous.keys.includes(row.key));
+    const messages=[...converted,...changedPending,...fresh];
     return {messages:messages.filter((row,i)=>messages.findIndex(x=>x.key===row.key)===i)};
   }
 }

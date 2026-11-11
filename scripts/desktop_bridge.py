@@ -39,6 +39,10 @@ class LASTINPUTINFO(C.Structure):
     _fields_=[('cbSize',W.UINT),('dwTime',W.DWORD)]
 U.GetLastInputInfo.argtypes=[C.POINTER(LASTINPUTINFO)]
 
+class ViewportPending(RuntimeError):
+    """This verified room has unread messages beyond the visible viewport."""
+
+
 def focus_state():
     hwnd=int(U.GetForegroundWindow() or 0);pid=W.DWORD()
     U.GetWindowThreadProcessId(hwnd,C.byref(pid))
@@ -384,7 +388,14 @@ class Bridge:
         read_started=time.perf_counter();chrome=[]
         root,hwnd=self.room(name,chrome_out=chrome)
         room_finished=time.perf_counter()
-        advance=self.refresh_unread(name,root,hwnd)
+        unread = None
+        try:
+            advance = self.refresh_unread(name,root,hwnd)
+        except ViewportPending as error:
+            if not U.IsIconic(hwnd) or diagnostic or not hasattr(self,'message_tracker'):
+                raise
+            unread = error
+            advance = False
         refresh_finished=time.perf_counter()
         if advance:
             chrome=[]
@@ -406,12 +417,22 @@ class Bridge:
         target_id=self.target(name)['id'];current=time.monotonic()
         previous=self.read_health.get(target_id,{})
         digest=hashlib.sha256(json.dumps([(row['id'],row['klass'],row['text']) for row in data],ensure_ascii=False).encode()).hexdigest()
+        generation = (self.pid,self.created,hwnd,root.AutomationId)
+        if unread and not self.message_tracker.has_visible_append(name,generation,data):
+            # A send may recheck the exact viewport just accepted by the poller.
+            confirmed = previous.get('partialAt')
+            if not (getattr(self,'checking_send',False) and digest == previous.get('digest')
+                    and confirmed is not None and current-confirmed < 10
+                    and self.message_tracker.rooms.get(name,{}).get('generation') == generation):
+                raise unread
         # Idle polls only reuse unchanged rows from this bound window. Recheck
         # account ownership before any new/updated payload crosses the native
         # transport boundary; sends still perform their own fresh checks.
         if previous.get('digest')!=digest:self.check(True)
         changed=current if previous.get('digest')!=digest else previous['changed']
         health={'digest':digest,'changed':changed,'saved':previous.get('saved',0)}
+        if unread:
+            health['partialAt'] = current if previous.get('digest') != digest else previous.get('partialAt')
         if current-health['saved']>3 and not getattr(self,'focus_depth',0):
             health['saved']=current
             scroll={'available':False}
@@ -432,6 +453,8 @@ class Bridge:
         self.read_health[target_id]=health
         if not hasattr(self,'message_tracker'):self.message_tracker=NativeMessageTracker()
         delivered,continuity=self.message_tracker.observe(name,(self.pid,self.created,hwnd,root.AutomationId),data,advance.get('unreadCount',0) if isinstance(advance,dict) else 0)
+        if unread:
+            continuity['unreadBeyondViewport'] = True
         if digest!=previous.get('digest'):
             receipt={'at':time.time(),'targetId':target_id,'pid':self.pid,'hwnd':hwnd,'digest':digest,**continuity}
             path=ROOT/'data'/('read_transitions_'+target_id+'.json')
@@ -454,7 +477,7 @@ class Bridge:
             if item.ControlTypeName!='ButtonControl' or not item.IsEnabled:continue
             label=item.Name or ''
             if re.fullmatch(r'\d+条新消息',label) or label.endswith('提到了你'):
-                raise RuntimeError('群“'+name+'”停在旧消息：请在微信中手动点未读提示跳到最新，再最小化群窗口；小汐已暂停本群读取，避免漏读或抢前台')
+                raise ViewportPending('群“'+name+'”停在旧消息：请在微信中手动点未读提示跳到最新，再最小化群窗口；小汐已暂停本群读取，避免漏读或抢前台')
         return False
 
     def prepare(self,name,text,expected_hwnd=None):
@@ -528,7 +551,12 @@ class Bridge:
         """Bound, non-activating send. No foreground/physical-input fallback."""
         submitted=False;value=None;protected=None
         try:
-            before=self.read(name);old={x['id'] for x in before['messages']}
+            self.checking_send = True
+            try:
+                before = self.read(name)
+            finally:
+                self.checking_send = False
+            old={x['id'] for x in before['messages']}
             hwnd=before['hwnd']
             if self._return_focus_is_uncertain(name,hwnd):
                 return dict(status='deferred',ids=[],note='后台跳转后输入焦点未确认；请在该群输入框点一下，再切回其他软件')
@@ -569,6 +597,8 @@ class Bridge:
                     if not submitted and value is not None and protected.poll() is None and value.Value==text:
                         value.SetValue('',waitTime=.1)
                         if value.Value:raise RuntimeError('本次临时草稿未确认清空，本条取消')
+        except ViewportPending as error:
+            return dict(status='unknown' if submitted else 'deferred',ids=[],note=str(error))
         except Exception as error:
             return dict(status='unknown' if submitted else 'not_sent',ids=[],note=str(error))
 
@@ -609,6 +639,8 @@ def main():
             try:
                 request=json.loads(line); result=bridge.dispatch(request)
                 print(json.dumps(dict(id=request.get('id'),result=result),ensure_ascii=False),flush=True)
+            except ViewportPending as error:
+                print(json.dumps(dict(id=request.get('id'),error=str(error),code='viewport_pending'),ensure_ascii=False),flush=True)
             except Exception as error:
                 print(json.dumps(dict(id=request.get('id'),error=str(error)),ensure_ascii=False),flush=True)
     finally:bridge.stop()

@@ -7,7 +7,10 @@ export function normalizeNativeMedia(row){
   const match=/^语音(\d{1,3})["″”]?秒([\s\S]*)$/u.exec(String(row.text??''));
   if(!match||Number(match[1])<1||Number(match[1])>120)return row;
   const text=match[2].trim();
-  const pending=!text||/^(?:未播放|已播放|未读|已读|转文字|转(?:换)?文字中[.。…]*|正在转文字[.。…]*|转换中[.。…]*|转(?:换)?文字失败(?:[，,]\s*请重试)?|无法转(?:换)?文字|暂不支持转文字|收起|展开)$/u.test(text);
-  if(pending||text.length>6000||text.includes('\0'))return {...row,inputModality:{kind:'voice_pending',durationSeconds:Number(match[1])}};
+  const state=text.replace(/[.。…]+$/u,'').trim();
+  const converting=/^(?:转(?:换)?文字中|正在转文字|转换中)$/u.test(state);
+  const failed=/^(?:转(?:换)?文字失败(?:[，,]\s*请重试)?|无法转(?:换)?文字|暂不支持转文字)$/u.test(state);
+  const pending=converting||failed||!state||/^(?:未播放|已播放|未读|已读|转文字|收起|展开)$/u.test(state);
+  if(pending||text.length>6000||text.includes('\0'))return {...row,inputModality:{kind:'voice_pending',stage:failed?'failed':converting?'converting':'waiting',durationSeconds:Number(match[1])}};
   return {...row,text,inputModality:{kind:'platform_transcript',provenance:'wechat_accessibility',durationSeconds:Number(match[1]),uncertain:true}};
 }

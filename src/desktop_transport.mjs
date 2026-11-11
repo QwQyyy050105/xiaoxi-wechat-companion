@@ -23,7 +23,13 @@ export class DesktopTransport extends EventEmitter {
           this.worker={pid:value.pid,created:value.created};this.launcherCreated=value.pid===child.pid?value.created:ancestor.created;this.handshake=true;this.emit('worker',this.worker);continue;
         }
         const waiting=this.requests.get(value.id);if(!waiting)continue;clearTimeout(waiting.timer);this.requests.delete(value.id);
-        value.error?waiting.reject(Error(value.error)):waiting.resolve(value.result);
+        if (value.error) {
+          const error = Error(value.error);
+          if (value.code === 'viewport_pending') error.code = value.code;
+          waiting.reject(error);
+        } else {
+          waiting.resolve(value.result);
+        }
       }
     });
     child.stderr.on('data',()=>{});child.stdin.on('error',()=>{});
