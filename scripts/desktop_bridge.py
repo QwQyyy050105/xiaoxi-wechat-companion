@@ -60,6 +60,36 @@ def modifiers_down():
 class NotPosted(RuntimeError):
     """No input event for this commit was accepted by the target queue."""
 
+def observe_send_echo(before, after, text):
+    """Return a local observation or None while a submitted message is pending."""
+    identity = ('pid', 'created', 'hwnd', 'windowBinding')
+    if any(not before.get(k) or before[k] != after.get(k) for k in identity):
+        return dict(status='unknown', ids=[], note='提交后绑定窗口已变化，未重试')
+    prior = before['messages']
+    rows = after['messages']
+    ids = [row['id'] for row in rows]
+    mode = after.get('continuity', {}).get('mode')
+    if (len(ids) != len(set(ids)) or (prior and mode != 'overlap')
+            or (not prior and mode not in ('baseline', 'overlap'))):
+        return dict(status='unknown', ids=[], note='消息列表连续性不足，未重试')
+    if prior:
+        last = prior[-1]['id']
+        if last not in ids:
+            return dict(status='unknown', ids=[], note='找不到提交前的消息位置，未重试')
+        rows = rows[ids.index(last) + 1:]
+    old = {row['id'] for row in prior}
+    candidates = [row for row in rows if row['id'] not in old and
+                  row.get('klass') == 'mmui::ChatTextItemView' and row.get('text') == text and
+                  row.get('own') is not False and row.get('role') != 'user']
+    if len(candidates) > 1:
+        return dict(status='unknown', ids=[], note='出现多个同文气泡，无法唯一关联，未重试')
+    if not candidates or after.get('draft') is not False:
+        return None
+    candidate = candidates[0]
+    author = 'self' if candidate.get('own') is True or candidate.get('role') == 'assistant' else 'unavailable'
+    return dict(status='local_echo', ids=[candidate['id']], echoAuthor=author,
+                echoEvidence='unique_text_and_cleared_draft', note='草稿已清空，本机出现一个新增同文文本气泡')
+
 def standalone_minimized_room(main,hwnd,pid):
     if not main or not hwnd or main==hwnd or not pid or not U.IsIconic(hwnd):return False
     for window in (main,hwnd):
@@ -495,7 +525,8 @@ class Bridge:
         previous=self.read_health.get(target_id,{})
         digest=hashlib.sha256(json.dumps([(row['id'],row['klass'],row['text']) for row in data],ensure_ascii=False).encode()).hexdigest()
         generation = (self.pid,self.created,hwnd,root.AutomationId)
-        if unread and not self.message_tracker.has_visible_append(name,generation,data):
+        if (unread and not self.message_tracker.has_visible_append(name,generation,data)
+                and not (voice_allowed and self.message_tracker.has_visible_voice_update(name,generation,data))):
             # A send may recheck the exact viewport just accepted by the poller.
             confirmed = previous.get('partialAt')
             if not (getattr(self,'checking_send',False) and digest == previous.get('digest')
@@ -539,7 +570,8 @@ class Bridge:
             try:history=json.loads(path.read_text(encoding='utf-8'))
             except (OSError,ValueError):history=[]
             path.write_text(json.dumps((history+[receipt])[-30:]),encoding='utf-8')
-        return dict(group=name,windowBinding=root.AutomationId,hwnd=hwnd,pid=self.pid,created=self.created,messages=delivered,draft=bool(field.GetValuePattern().Value),listRect=rect(messages),continuity=continuity)
+        return dict(group=name,windowBinding=root.AutomationId,hwnd=hwnd,pid=self.pid,created=self.created,messages=delivered,
+                    isMinimized=bool(U.IsIconic(hwnd)),draft=bool(field.GetValuePattern().Value),listRect=rect(messages),continuity=continuity)
 
     def refresh_unread(self,name,root,hwnd):
         """Refuse to baseline an out-of-viewport message without moving UI.
@@ -697,7 +729,6 @@ class Bridge:
                 before = self.read(name)
             finally:
                 self.checking_send = False
-            old={x['id'] for x in before['messages']}
             hwnd=before['hwnd']
             use_button=standalone_minimized_room(getattr(self,'main',None),hwnd,getattr(self,'pid',None))
             if not use_button and self._return_focus_is_uncertain(name,hwnd):
@@ -744,10 +775,10 @@ class Bridge:
                     deadline=time.monotonic()+5
                     while time.monotonic()<deadline:
                         after=self.read(name)
-                        echo=[x for x in after['messages'] if x['id'] not in old and x['text']==text]
-                        if echo and not after['draft']:
-                            self.mark_send('echo')
-                            return dict(status='local_echo',ids=[x['id'] for x in echo],note='后台发送，本机气泡已确认；无服务端送达回执')
+                        observation=observe_send_echo(before,after,text)
+                        if observation is not None:
+                            if observation['status']=='local_echo':self.mark_send('echo')
+                            return observation
                         time.sleep(.2)
                     return dict(status='unknown',ids=[],note='后台提交后未确认气泡，不自动重试')
                 finally:

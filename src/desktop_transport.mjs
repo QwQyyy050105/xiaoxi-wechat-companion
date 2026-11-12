@@ -6,8 +6,10 @@ import {fileURLToPath} from 'node:url';
 import {assertScopedNativeRequest} from './conversation_scope.mjs';
 
 const nativeSendResults = new WeakSet();
+const nativeReadWindows = new WeakMap();
 const bundledWorker = fileURLToPath(new URL('../scripts/desktop_bridge.py',import.meta.url));
 export function isNativeWeChatSend(result) { return nativeSendResults.has(result); }
+export function nativeReadWindowMinimized(snapshot) { return nativeReadWindows.get(snapshot); }
 
 export class DesktopTransport extends EventEmitter {
   constructor(root,{workerPath,pythonPath}={}){super();this.root=root;this.workerPath=workerPath||path.join(root,'scripts/desktop_bridge.py');this.pythonPath=pythonPath||process.env.XIAOXI_PYTHON||path.join(root,process.platform==='win32'?'runtime/desktop_bridge/Scripts/python.exe':'runtime/desktop_bridge/bin/python');this.child=null;this.requests=new Map();this.serial=0;this.tail=Promise.resolve();this.worker=null;this.termination=null;}
@@ -33,10 +35,13 @@ export class DesktopTransport extends EventEmitter {
           if (value.code === 'viewport_pending') error.code = value.code;
           waiting.reject(error);
         } else {
-          if (waiting.command === 'send' && this.handshake && process.platform === 'win32' &&
-              path.relative(bundledWorker,this.workerPath) === '' &&
-              value.result && [true,false,null].includes(value.result.wechatForegroundObserved)) {
-            nativeSendResults.add(value.result);
+          if (value.result && this.handshake && process.platform === 'win32' && path.relative(bundledWorker,this.workerPath) === '') {
+            if (waiting.command === 'send' && [true,false,null].includes(value.result.wechatForegroundObserved)) {
+              nativeSendResults.add(value.result);
+            }
+            if (waiting.command === 'read' && typeof value.result.isMinimized === 'boolean') {
+              nativeReadWindows.set(value.result,value.result.isMinimized);
+            }
           }
           waiting.resolve(value.result);
         }

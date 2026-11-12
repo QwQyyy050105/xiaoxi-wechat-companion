@@ -21,8 +21,8 @@ def voice_update(old, new):
     if not a or not b or a.group(1) != b.group(1):
         return False
     status = re.sub(r'[,，]\s*', '，', pending.rstrip('.。…').strip())
-    return status in ('', '未播放', '已播放', '未读', '已读', '转文字', '转文字中', '转换文字中', '正在转文字', '转换中',
-                      '转文字失败', '转换文字失败', '转文字失败，请重试', '无法转文字', '暂不支持转文字')
+    return status in ('', '未播放', '已播放', '未读', '已读', '转文字', '收起', '展开', '转文字中', '转换文字中', '正在转文字', '转换中',
+                      '转文字失败', '转换文字失败', '转文字失败，请重试', '转换文字失败，请重试', '无法转文字', '无法转换文字', '暂不支持转文字')
 
 
 class NativeMessageTracker:
@@ -54,7 +54,34 @@ class NativeMessageTracker:
         old_ids = {row['nativeId'] for row in old}
         return matched == pair and old_ids.isdisjoint(ids[end+1:])
 
+    def has_visible_voice_update(self, name, generation, rows):
+        """Prove a live pending voice changed in place while the unread notice stayed up."""
+        previous = self.rooms.get(name)
+        if not previous or previous['generation'] != generation or not previous['pending_voice_ids'] or not rows:
+            return False
+        old = previous['rows']
+        old_ids = [row['nativeId'] for row in old]
+        ids = [row['id'] for row in rows]
+        if len(set(ids)) != len(ids) or len(set(old_ids)) != len(old_ids) or ids[0] not in old_ids:
+            return False
+        # A partially scrolled viewport must still contain the complete old tail.
+        tail = old[old_ids.index(ids[0]):]
+        if len(tail) < 2 or ids[:len(tail)] != [row['nativeId'] for row in tail] or set(old_ids).intersection(ids[len(tail):]):
+            return False
+        stable_anchor = False
+        changed_voice = False
+        for before, after in zip(tail, rows):
+            if fingerprint(before) == fingerprint(after):
+                stable_anchor = True
+            elif (before['id'] in previous['pending_voice_ids'] and voice_update(before, after)
+                  and len(after.get('text', '')) <= 6010 and '\0' not in after.get('text', '')):
+                changed_voice = True
+            else:
+                return False
+        return stable_anchor and changed_voice
+
     def observe(self, name, generation, rows, unread_count=0):
+        """Map native rows and retain the IDs of new voices still awaiting text."""
         previous = self.rooms.get(name)
         old = previous['rows'] if previous and previous['generation'] == generation else []
         rows = [dict(row, nativeId=row['id']) for row in rows]
@@ -129,6 +156,7 @@ class NativeMessageTracker:
         # Native send verification also performs reads. Keep the observed stream
         # across those internal reads so a jump cannot consume the only anchor
         # before the JS polling loop sees it. No disk history is consulted.
+        pending_voice_ids = set()
         if old and mode in ('overlap', 'verified_unread_tail'):
             stream = [dict(row) for row in previous.get('stream', old)]
             latest_by_id = {row['id']:row for row in rows}
@@ -137,7 +165,12 @@ class NativeMessageTracker:
             known = {row['id'] for row in stream}
             stream.extend(row for row in fresh if row['id'] not in known)
             delivery = stream[-100:]
-        self.rooms[name] = {'generation': generation, 'rows': rows, 'stream': delivery}
+            # Baseline and gap rows cannot authorize a later change behind a notice.
+            live_ids = previous['pending_voice_ids'] | {row['id'] for row in fresh}
+            pending_voice_ids = {row['id'] for row in rows if row['id'] in live_ids
+                                 and row.get('klass') == 'mmui::ChatVoiceItemView' and voice_update(row, row)}
+        self.rooms[name] = {'generation': generation, 'rows': rows, 'stream': delivery,
+                            'pending_voice_ids': pending_voice_ids}
         return delivery, {'mode': mode, 'visibleRows': len(rows), 'deliveredRows': len(delivery),
                           'unreadCount': unread_count, 'visibleUnreadRows': fresh_count,
                           'unreadOutsideViewport': max(0, unread_count - len(rows)) if mode == 'verified_unread_tail' else 0}

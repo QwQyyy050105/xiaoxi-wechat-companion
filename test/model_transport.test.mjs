@@ -11,19 +11,24 @@ import {generate} from '../src/model.mjs';
 const originalSpawn=childProcess.spawn,originalPath=process.env.CODEX_CLI_PATH;
 let child,args;const spawned=[];
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+let signalSpawn;
 before(()=>{
  process.env.CODEX_CLI_PATH=process.execPath;
  childProcess.spawn=(_executable,argv)=>{
   args=argv;spawned.push([...argv]);child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();
-  child.kill=()=>{child.killed=true;return true;};return child;
+  child.kill=()=>{child.killed=true;return true;};
+  signalSpawn?.();return child;
  };syncBuiltinESMExports();
 });
 after(()=>{childProcess.spawn=originalSpawn;syncBuiltinESMExports();if(originalPath===undefined)delete process.env.CODEX_CLI_PATH;else process.env.CODEX_CLI_PATH=originalPath;});
 function emit(event){child.stdout.write(JSON.stringify(event)+'\n');}
 async function start(overrides={}){
  child=null;let prepared;
+ const workerStarted=new Promise(resolve=>{signalSpawn=resolve;});
  const promise=generate({settings:{provider:'codex',model:'',webSearch:false},persona:{name:'小汐'},session:{channel:'local',messages:[{role:'user',text:'你好'}]},memories:[],root:path.resolve('.'),onPrepared:d=>prepared=d,...overrides});
- const deadline=Date.now()+1000;while(!child){assert.ok(Date.now()<deadline);await tick();}
+ try {
+   await Promise.race([workerStarted,promise.then(()=>assert.fail('generation finished without starting the worker'))]);
+ } finally {signalSpawn=undefined;}
  return {promise,prepared};
 }
 test('committed answer resolves before slow child shutdown; partial items alone cannot deliver',async()=>{

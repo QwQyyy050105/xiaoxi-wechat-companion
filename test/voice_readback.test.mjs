@@ -5,6 +5,7 @@ import path from 'node:path';
 import {Companion} from '../src/core.mjs';
 import {MessageGate} from '../src/message_gate.mjs';
 import {standaloneVoiceRequest,summarizeVoiceDelivery} from '../src/voice_reply_receipt.mjs';
+import {nativeReadWindowMinimized} from '../src/desktop_transport.mjs';
 import {LiveVoiceReadback,wantsVoiceReadback} from '../src/voice_readback.mjs';
 import {normalizeNativeMedia} from '../src/native_media.mjs';
 import {loadVoiceTargets,VoiceIntakeScope} from '../src/voice_scope.mjs';
@@ -286,6 +287,29 @@ test('no native response is not a receipt and unmeasured focus stays unknown',()
   assert.equal(summarizeVoiceDelivery(100,1,[],150),null);
   const rec=summarizeVoiceDelivery(100,1,[{status:'not_sent',wechatForegroundObserved:null}],150);
   assert.equal(rec.status,'not_sent');assert.equal(rec.wechatForegroundObserved,null);
+});
+test('a native voice receipt distinguishes a minimized read, an open window and unobserved input',()=>{
+  const sent=[{status:'local_echo',wechatForegroundObserved:false}];
+  for(const minimized of [true,false]){
+    const receipt=summarizeVoiceDelivery(100,1,sent,150,minimized);
+    assert.equal(receipt.inputSource,'wechat_platform_transcript');
+    assert.equal(receipt.inputWindowMinimized,minimized);
+  }
+  for(const unverified of [undefined,null,'true']){
+    const receipt=summarizeVoiceDelivery(100,1,sent,150,unverified);
+    assert.equal(Object.hasOwn(receipt,'inputSource'),false);
+    assert.equal(Object.hasOwn(receipt,'inputWindowMinimized'),false);
+  }
+  assert.equal(nativeReadWindowMinimized({isMinimized:true}),undefined);
+});
+test('a multipart echo keeps missing author information explicit',()=>{
+  const known={status:'local_echo',echoEvidence:'unique_text_and_cleared_draft',echoAuthor:'self'};
+  const summarize=(...parts)=>summarizeVoiceDelivery(100,parts.length,parts,150);
+  assert.equal(summarize(known).echoAuthor,'self');
+  assert.equal(summarize(known,{...known,echoAuthor:'unavailable'}).echoAuthor,'unavailable');
+  assert.equal(summarize({...known,echoAuthor:undefined}).echoAuthor,'unavailable');
+  assert.equal(summarize({status:'unknown'}).echoEvidence,undefined);
+  assert.equal(summarize({status:'local_echo'}).echoEvidence,undefined);
 });
 test('a simulated or plugin send cannot create a real voice receipt even when it supplies focus fields',async t=>{
   const {core,target,poll,sent}=fixture(t);

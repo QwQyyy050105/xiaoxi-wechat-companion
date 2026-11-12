@@ -201,7 +201,8 @@ class Guards(unittest.TestCase):
         def lease(*_):
             events.append('acquire');yield Guard();events.append('restore')
         b.focus_lease=lease;b.check=lambda *_:None;b.room=lambda *_,**__:(object(),1)
-        reads=[{'hwnd':1,'messages':[],'draft':False},{'messages':[{'id':'new','text':'hello'}],'draft':False}]
+        view={'hwnd':1,'pid':10,'created':100,'windowBinding':'fixture','continuity':{'mode':'baseline'},'draft':False}
+        reads=[dict(view,messages=[]),dict(view,messages=[{'id':'new','text':'hello','klass':'mmui::ChatTextItemView'}])]
         b.read=lambda *_:reads.pop(0)
         def prepare(*_,**kwargs):
             self.assertEqual(kwargs['expected_hwnd'],1);events.append('prepare');return object(),object(),Pattern(),1

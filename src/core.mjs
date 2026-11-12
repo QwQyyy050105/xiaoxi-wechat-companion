@@ -7,7 +7,7 @@ import path from 'node:path';
 import {EventEmitter} from 'node:events';
 import {Store,uid,now} from './store.mjs';
 import {generate,generateSearch,validateEndpoint} from './model.mjs';
-import {DesktopTransport,isNativeWeChatSend} from './desktop_transport.mjs';
+import {DesktopTransport,isNativeWeChatSend,nativeReadWindowMinimized} from './desktop_transport.mjs';
 import {standaloneVoiceRequest,summarizeVoiceDelivery} from './voice_reply_receipt.mjs';
 import {recoveryOutbox,recoveryRequest} from './draft_recovery.mjs';
 import {MessageGate,shouldReply,recoverInterrupted} from './message_gate.mjs';
@@ -314,7 +314,7 @@ export class Companion extends EventEmitter {
       message={...message,key:'voice/'+message.id};
       this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'platform_transcript',at:now()}};
     }
-    this.ingestContent(target,session,message,snapshot);
+    this.ingestContent(target,session,message,snapshot,fromGate);
   }
   async transcribeIncomingVoice(target,session,message,snapshot){
     if(!this.voiceScope.allows(target.id)||!this.scopedTargetSession(target,session.id))return;
@@ -337,10 +337,14 @@ export class Companion extends EventEmitter {
       if(current())this.targetStates[target.id]={...this.targetStates[target.id],lastVoice:{stage:'audio_unavailable',at:now()}};
     }finally{this.audioJobs.delete(key);}
   }
-  ingestContent(target,session,message,snapshot){
+  ingestContent(target,session,message,snapshot,fromGate=false){
     const isText=message.klass==='mmui::ChatTextItemView'||['platform_transcript','asr_transcript'].includes(message.inputModality?.kind);
     const event=this.context.observe(session.id,{...message,role:'user',sourceKey:`${snapshot.created}/${snapshot.hwnd}/${target.id}/${message.key||message.id}`,receivedAt:this.nowMs(),sender:message.sender||{evidence:'unknown'},attachments:message.attachments||[]});
     if(!event||!isText||!event.text.trim()||event.text.length>6000)return;
+    if(fromGate && event.inputModality?.kind==='platform_transcript'){
+      const minimized=nativeReadWindowMinimized(snapshot);
+      if(typeof minimized==='boolean')event.nativeVoiceWindowMinimized=minimized;
+    }
     const requestedTranscript=this.voiceReadbacks.observe(session.id,message);
     if(requestedTranscript && this.running && target.enabled && !target.paused && target.mode!=='observe' && !this.suspended.has(target.id)){
       this.accept(target,{...message,event,replyReason:'requested_voice_transcript',directReply:requestedTranscript,key:message.key||message.id},snapshot);
@@ -499,7 +503,7 @@ export class Companion extends EventEmitter {
         if(result.status!=='local_echo'){finalStatus=result.status==='unknown'?'uncertain':'error';break;}
       }
       const receipt=voiceInput && this.voiceScope.allows(target.id)
-        ? summarizeVoiceDelivery(voiceInput.receivedAt,plan.parts.length,nativeParts,this.nowMs()) : null;
+        ? summarizeVoiceDelivery(voiceInput.receivedAt,plan.parts.length,nativeParts,this.nowMs(),voiceInput.nativeVoiceWindowMinimized) : null;
       this.store.change(s=>{
         for(const i of s.inbox.filter(x=>ids.includes(x.id)))i.status=finalStatus;
         const room=receipt && s.targets.find(row=>row.id===target.id);

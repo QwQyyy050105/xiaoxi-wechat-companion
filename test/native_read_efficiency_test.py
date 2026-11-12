@@ -270,9 +270,10 @@ class SendChromeTests(unittest.TestCase):
         return patcher.start()
 
     def stub_snapshot_and_echo(self):
+        view = {'hwnd':7,'pid':10,'created':100,'windowBinding':'fixture','continuity':{'mode':'baseline'},'draft':False}
         self.bridge.read = Mock(side_effect=[
-            {'hwnd': 7, 'messages': [], 'draft': False},
-            {'hwnd': 7, 'messages': [{'id': 'new', 'text': 'reply'}], 'draft': False},
+            dict(view,messages=[]),
+            dict(view,messages=[{'id':'new','text':'reply','klass':'mmui::ChatTextItemView'}]),
         ])
 
     def test_real_room_supplies_readable_chrome_only_after_group_binding(self):

@@ -144,6 +144,10 @@ function render(s){
       const focus=receipt.wechatForegroundObserved===true?'微信进入过前台':receipt.wechatForegroundObserved===false?'采样时微信未到前台':'前台状态未知';
       const line=el('p','最近一次语音自动回复 · '+new Date(receipt.finishedAt).toLocaleTimeString()+' · ');
       line.append(el('strong',delivery+'，手机送达未验证'),document.createTextNode(' · '+focus));
+      if(receipt.echoAuthor==='unavailable')line.append(document.createTextNode(' · 微信未标出气泡作者'));
+      if(receipt.inputSource==='wechat_platform_transcript' && typeof receipt.inputWindowMinimized==='boolean'){
+        line.append(document.createTextNode(receipt.inputWindowMinimized?' · 读到微信转写时群窗已最小化':' · 读到微信转写时群窗已展开'));
+      }
       row.append(line);
     }
     if(r?.lastVoice){
