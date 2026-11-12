@@ -7,7 +7,9 @@ import path from 'node:path';
 import {EventEmitter} from 'node:events';
 import {Store,uid,now} from './store.mjs';
 import {generate,generateSearch,validateEndpoint} from './model.mjs';
-import {DesktopTransport} from './desktop_transport.mjs';
+import {DesktopTransport,isNativeWeChatSend} from './desktop_transport.mjs';
+import {standaloneVoiceRequest,summarizeVoiceDelivery} from './voice_reply_receipt.mjs';
+import {recoveryOutbox,recoveryRequest} from './draft_recovery.mjs';
 import {MessageGate,shouldReply,recoverInterrupted} from './message_gate.mjs';
 import {ConversationContext,sameVerifiedSender,senderEvidence} from './conversation_context.mjs';
 import {completeReminderTime} from './conversational_reminder.mjs';
@@ -30,6 +32,7 @@ import {loadGroupProfile} from './group_profile.mjs';
 import {PublicLookupConversation} from './public_lookup_conversation.mjs';
 import {GroupMediaInput} from './group_media.mjs';
 import {normalizeNativeMedia} from './native_media.mjs';
+import {loadVoiceTargets,VoiceIntakeScope} from './voice_scope.mjs';
 import {LiveVoiceReadback,wantsVoiceReadback} from './voice_readback.mjs';
 import {canTranscribeLocalWave} from './local_asr.mjs';
 import {planContextResearch,researchEvidence,PublicResearchCache} from './research_intent.mjs';
@@ -49,6 +52,7 @@ export class Companion extends EventEmitter {
     this.personaLoader=new PersonaLoader(root,{nowMs});
     const loaded=this.personaLoader.load();this.persona=loaded.persona;this.personaStatus=loaded.status;this.modelInput=null;
     this.reminderFollowups = new Map();
+    this.voiceScope = new VoiceIntakeScope(loadVoiceTargets);
     this.voiceReadbacks = new LiveVoiceReadback(nowMs);
     this.gate=new MessageGate();this.controllers=new Map();this.targetStates={};this.pending=new Map();this.processing=new Set();this.ownIds=new Set();this.suspended=new Set();this.generation=0;this.running=false;this.attempting=false;this.timer=null;this.stopping=null;
     this.weather=weather===undefined?createWeatherConversation({nowMs}):weather;
@@ -161,6 +165,7 @@ export class Companion extends EventEmitter {
     if(!this.running)return;if(this.attempting){this.schedule(1000);return;}this.attempting=true;const generation=this.generation;let localBridge;
     try{
       this.gate.clear();this.ownIds.clear();this.invalidateAll('重新连接');
+      this.voiceScope.reload();
       const targets=filterAuthorizedWechatTargets(this.store.value.targets,{enabledOnly:true});
       if(!targets.length)throw Error('没有启用的授权会话；请在本机配置会话并启用');
       localBridge=this.transportFactory();this.bridge=localBridge;localBridge.start();
@@ -169,7 +174,7 @@ export class Companion extends EventEmitter {
       this.connection={...connection,stage:'connected',message:'已核对配置账号；仅处理连接后新出现的消息'};
       for(const target of targets){
         if(!this.running||generation!==this.generation)break;
-        try{const snap=await localBridge.call('open',{group:target.name,allowForeground:allowWindowOpen});if(generation!==this.generation)return;this.store.change(s=>s.targets.find(x=>x.id===target.id).windowBinding=snap.windowBinding);this.gate.observe(target,snap);this.seedVisibleBackground(target,snap);this.targetStates[target.id]={stage:'listening',message:'监听中，启动可见内容仅作背景，不补发',lastRead:now()};}
+        try{const snap=this.voiceScope.snapshot(target.id,await localBridge.call('open',{group:target.name,allowForeground:allowWindowOpen}));if(generation!==this.generation)return;this.store.change(s=>s.targets.find(x=>x.id===target.id).windowBinding=snap.windowBinding);this.gate.observe(target,snap);this.seedVisibleBackground(target,snap);this.targetStates[target.id]={stage:'listening',message:'监听中，启动可见内容仅作背景，不补发',lastRead:now()};}
         catch(error){this.targetStates[target.id]={stage:'error',message:error.message};}
       }
       this.event('微信连接已建立；各会话重新建立基线，未补发历史消息。');
@@ -188,7 +193,7 @@ export class Companion extends EventEmitter {
       for(const target of filterAuthorizedWechatTargets(this.store.value.targets,{enabledOnly:true})){
         if(!this.running||generation!==this.generation)break;
         try{
-          const snapshot=await localBridge.call('read',{group:target.name});
+          const snapshot=this.voiceScope.snapshot(target.id,await localBridge.call('read',{group:target.name}));
           if(!this.running||generation!==this.generation)break;
           const previousState = this.targetStates[target.id];
           if (previousState?.viewportHeldAt != null) {
@@ -209,8 +214,8 @@ export class Companion extends EventEmitter {
             continue;
           }
           for(const message of observed.messages){
-            const ownText=this.store.value.outbox.some(x=>x.sessionId===this.sessionFor(target.id)?.id&&x.text===message.text&&Date.now()-Date.parse(x.createdAt)<180000);
-            if(!this.ownIds.has(message.id)&&!ownText)this.ingest(target,message,snapshot);
+            const ownText=message.klass==='mmui::ChatTextItemView' && this.store.value.outbox.some(x=>x.sessionId===session?.id&&x.text===message.text&&Date.now()-Date.parse(x.createdAt)<180000);
+            if(!this.hasSentText(target,message)&&!ownText)this.ingest(target,message,snapshot,{fromGate:true});
           }
           if(target.paused){this.targetStates[target.id].stage='paused';this.targetStates[target.id].message='主人已暂停本群回复，其他群不受影响';}
           else if(session&&this.policy.state(session.id).waiting){this.targetStates[target.id].stage='waiting_input';this.targetStates[target.id].message='等待明确补充；超时不补发旧回答';}
@@ -282,19 +287,21 @@ export class Companion extends EventEmitter {
     // This already-read visible snapshot is context only. It never enters the
     // trigger policy, inbox or reply queue, even if it contains calls/commands.
     for(const original of snapshot.messages.slice(-this.context.maxMessages)){
-      const message=normalizeNativeMedia(original);
+      const allowed=this.voiceScope.row(target.id,original);if(!allowed)continue;
+      const message=normalizeNativeMedia(allowed);
       if(message.klass!=='mmui::ChatTextItemView'&&message.inputModality?.kind!=='platform_transcript'||typeof message.text!=='string'||!message.text.trim()||!message.id)continue;
-      if(message.own===true||message.role==='assistant'||this.ownIds.has(message.id))continue;
+      if(message.own===true||message.role==='assistant'||this.hasSentText(target,message))continue;
       const key=message.key||`${message.id}/${message.klass}/${message.text}`;
       this.context.observe(session.id,{id:message.id,sourceKey:`${snapshot.created}/${snapshot.hwnd}/${target.id}/${key}`,
         observationMode:'baseline',role:message.own===false?'user':'unknown',receivedAt:this.nowMs(),
         sender:message.sender||{evidence:'unknown'},text:message.text,inputModality:message.inputModality,attachments:message.attachments||[]});
     }
   }
-  ingest(target,message,snapshot){
-    if(!isAuthorizedWechatTarget(target))return;
+  ingest(target,message,snapshot,{fromGate=false}={}){
+    if(!isAuthorizedWechatTarget(target)||message?.own===true||message?.role==='assistant')return;
+    message=this.voiceScope.row(target.id,message);if(!message)return;
     const session=this.sessionFor(target.id);if(!session)return;
-    message=normalizeNativeMedia(message);
+    if(!fromGate)message=normalizeNativeMedia(message);
     if(message.inputModality?.kind==='voice_pending'){
       this.voiceReadbacks.observe(session.id,message);
       const stage={failed:'transcription_failed',converting:'transcribing'}[message.inputModality.stage]??'waiting_transcript';
@@ -310,13 +317,14 @@ export class Companion extends EventEmitter {
     this.ingestContent(target,session,message,snapshot);
   }
   async transcribeIncomingVoice(target,session,message,snapshot){
+    if(!this.voiceScope.allows(target.id)||!this.scopedTargetSession(target,session.id))return;
     const audio=message.attachments?.filter(a=>a.kind==='audio'&&a.available===true);
     if(!this.running||this.demo||!target.enabled||target.paused||target.mode==='observe'||this.suspended.has(target.id)||
        !this.extensions?.has('transport')||!this.media.capabilities().audioTranscription||audio?.length!==1)return;
     const key=JSON.stringify([session.id,message.id]);
     if(this.audioJobs.has(key)||this.audioJobs.size>=4)return;
     const controller=new AbortController(), generation=this.generation, scope=this.context.generation(session.id);
-    const current=()=>this.running&&this.generation===generation&&!controller.signal.aborted&&this.context.generation(session.id)===scope&&
+    const current=()=>this.running&&this.voiceScope.allows(target.id)&&this.generation===generation&&!controller.signal.aborted&&this.context.generation(session.id)===scope&&
       this.scopedTargetSession(target,session.id)&&!this.suspended.has(target.id)&&this.store.value.targets.some(t=>t.id===target.id&&t.enabled&&!t.paused&&t.mode!=='observe');
     this.audioJobs.set(key,{controller,sessionId:session.id});
     try{
@@ -369,7 +377,7 @@ export class Companion extends EventEmitter {
       const presenceOnly=decision.reason==='social_summons'&&!decision.replyContext&&!event.quote&&!event.attachments?.length;
       const summonsContinuationKey=decision.reason==='social_summons'&&previousEngagement&&!previousEngagement.interrupted&&previousEngagement.generation===event.generation?previousEngagement.lastAcceptedKey:undefined;
       const readback=!message.inputModality && !event.quote && !event.attachments?.length && wantsVoiceReadback(event.text,this.policy.names)
-        ? this.voiceReadbacks.request(session.id) : null;
+        ? (this.voiceScope.allows(target.id)?this.voiceReadbacks.request(session.id):{text:'这个群没有开启语音识别'}) : null;
       const accepted=this.accept(target,{...message,event:{...event,...(decision.replyContext?{replyContext:decision.replyContext}:{}),...(decision.engagement?{engagement:decision.engagement}:{})},replyReason:readback?'requested_voice_readback':decision.reason,summonsContinuationKey,directReply:readback?.text||decision.clarification||(presenceOnly?'在呢':undefined),key:message.key||message.id},snapshot);
       if(accepted?.eligible)readback?.wait?.();
       // A redundant ping must not replace the pending question's reply/answer slot.
@@ -474,6 +482,9 @@ export class Companion extends EventEmitter {
       }
       if(!reply||!this.validTurn(sessionId,turn)){this.store.change(s=>{for(const i of s.inbox.filter(x=>ids.includes(x.id)&&x.status==='generating')){i.status='skipped';i.reason=reply?'本轮已取消':'本轮保持安静';}});return;}
       const plan=planTextReply(reply,{splitReplies:currentTarget?.preferences?.splitReplies===true});
+      const voiceInput=this.voiceScope.allows(target.id) && !this.demo && ['reply','continued','proactive'].includes(turn.kind)
+        ? standaloneVoiceRequest(events) : null;
+      const nativeParts=[];
       turn.deliveryStarted=true;
       turn.sendTiming = {attempts:0, deferred:0, bridgeMs:0, waitMs:0};
       let finalStatus='completed';
@@ -484,9 +495,16 @@ export class Companion extends EventEmitter {
         const result=await this.deliver(target,out,generation,{signal:controller.signal,sendTiming:turn.sendTiming});
         if(!result||!this.running||generation!==this.generation)return;
         this.recordDelivery(target,sessionId,out,result,item.event);
+        if(voiceInput&&isNativeWeChatSend(result))nativeParts.push(result);
         if(result.status!=='local_echo'){finalStatus=result.status==='unknown'?'uncertain':'error';break;}
       }
-      this.store.change(s=>{for(const i of s.inbox.filter(x=>ids.includes(x.id)))i.status=finalStatus;});
+      const receipt=voiceInput && this.voiceScope.allows(target.id)
+        ? summarizeVoiceDelivery(voiceInput.receivedAt,plan.parts.length,nativeParts,this.nowMs()) : null;
+      this.store.change(s=>{
+        for(const i of s.inbox.filter(x=>ids.includes(x.id)))i.status=finalStatus;
+        const room=receipt && s.targets.find(row=>row.id===target.id);
+        if(room)room.lastNativeVoiceReply=receipt;
+      });
     }catch(error){this.store.change(s=>{for(const i of s.inbox.filter(x=>ids.includes(x.id))){i.status=controller.signal.aborted?'skipped':'error';i.reason=controller.signal.aborted?'本轮已取消':error.message;}});if(!controller.signal.aborted)this.event(`${target.name}：${error.message}`);}
     finally{
       const finished=performance.now();
@@ -505,8 +523,11 @@ export class Companion extends EventEmitter {
     }
   }
   validTurn(sessionId,turn){return !turn.controller.signal.aborted&&this.running&&turn.generation===this.generation&&this.store.session(sessionId)?.epoch===turn.epoch&&this.context.generation(sessionId)===turn.contextGeneration;}
+  hasSentText(target,message){
+    return message.klass==='mmui::ChatTextItemView'&&this.ownIds.has(JSON.stringify([target.id,message.id]));
+  }
   recordDelivery(target,sessionId,out,result,event){
-    for(const id of result.ids||[])this.ownIds.add(id);
+    for(const id of result.ids||[])this.ownIds.add(JSON.stringify([target.id,id]));
     if(this.ownIds.size>1000)this.ownIds=new Set([...this.ownIds].slice(-500));
     this.store.change(s=>{
       Object.assign(s.outbox.find(x=>x.id===out.id),{status:result.status,note:result.note});
@@ -618,6 +639,7 @@ export class Companion extends EventEmitter {
       }
     }
     const mediaIntent=classifyMediaRequest(body);
+    if(mediaIntent.voiceInput&&session.channel==='desktop_wechat'&&!this.voiceScope.allows(session.peerId))return '这个群没有开启语音识别';
     if(mediaIntent.image&&mediaIntent.voiceInput)return '图和语音都提到了，你想先看哪一个？';
     if(mediaIntent.image||mediaIntent.voiceInput){
       const kind=mediaIntent.voiceInput?'audio':'image';
@@ -822,16 +844,39 @@ export class Companion extends EventEmitter {
       const bridge=this.bridge,generation=this.generation;
       // Keep the group quarantined until its current baseline is captured.
       // Clearing the gate and returning first swallowed the next live poll.
+      const sessionId=this.sessionFor(p.id)?.id;
+      const clean=p.clearDraft===true;
+      const currentOut=()=>recoveryOutbox(this.store.value,this.store.value.targets.find(row=>row.id===p.id),sessionId,p.outboxId);
+      if(clean&&(!this.running||!bridge||!this.scopedTargetSession(target,sessionId)))throw Error('请先连接原账号和群窗口');
+      if(clean)currentOut();
       let baseline;
       if(this.running&&bridge){
-        baseline=await bridge.call('read',{group:target.name});
+        baseline=this.voiceScope.snapshot(target.id,await bridge.call('read',{group:target.name}));
         if(!this.running||this.bridge!==bridge||this.generation!==generation)throw Error('恢复期间连接已变化，请重新核对后恢复');
         if(target.windowBinding&&baseline.windowBinding!==target.windowBinding)throw Error('恢复期间会话身份已变化，未解除隔离');
+        if(clean){
+          const out=currentOut();
+          const fields=recoveryRequest(this.store.value,target,out,baseline);
+          const active=()=>this.running&&this.bridge===bridge&&this.generation===generation&&this.scopedTargetSession(target,sessionId)&&currentOut().id===out.id;
+          const receipt=await bridge.call('clear_unknown_draft',fields,15000,{beforeSubmit:active});
+          if(receipt?.cleared!==true||!active())throw Error('草稿清理未确认，已保留发送隔离');
+          baseline=this.voiceScope.snapshot(target.id,await bridge.call('read',{group:target.name}));
+          if(!active()||baseline.draft||(baseline.windowBinding??baseline.peerId)!==fields.binding||baseline.hwnd!==fields.hwnd||baseline.pid!==fields.pid||baseline.created!==fields.created)
+            throw Error('清理后群窗口或草稿变化，已保留发送隔离');
+          recoveryRequest(this.store.value,target,out,baseline,false);
+        }
       }
       this.invalidateSession(this.sessionFor(p.id)?.id,'主人已核对未确认发送',{clearContext:true});
       this.gate.rooms.delete(p.id);
       if(baseline){this.gate.observe(target,baseline);this.seedVisibleBackground(target,baseline);}
-      this.store.change(s=>{s.targets.find(x=>x.id===p.id).quarantined=false;});this.suspended.delete(p.id);
+      this.store.change(s=>{
+        s.targets.find(x=>x.id===p.id).quarantined=false;
+        const last=s.outbox.filter(row=>row.sessionId===sessionId).at(-1);
+        if(last?.status==='unknown'){
+          last.ownerReviewedAt=now();
+          if(clean)last.draftClearedAt=last.ownerReviewedAt;
+        }
+      });this.suspended.delete(p.id);
       this.event(`${target.name}：主人已核对，接收基线已就绪；旧回答未重发`);return true;
     }
     if(action==='deployment.get')return loadDeployment();
@@ -864,7 +909,7 @@ export class Companion extends EventEmitter {
       await this.stop();
       const previous=this.store.value.targets.find(x=>x.id===p.id);
       const same=previous&&previous.name===p.name.trim()&&previous.kind===p.kind;
-      this.store.change(s=>{const row={id,name:p.name.trim(),kind:p.kind,mode:p.mode,enabled:!!p.enabled,paused:same?!!previous.paused:false,quarantined:same?!!previous.quarantined:false,proactive,...(previous?.wechatPeerId?{wechatPeerId:previous.wechatPeerId}:{}),participation:{idleMs,maxMs},preferences:{style,splitReplies:p.preferences?.splitReplies===true},...(same&&previous.windowBinding?{windowBinding:previous.windowBinding}:{})};const index=s.targets.findIndex(x=>x.id===p.id);if(index>=0)s.targets[index]=row;else s.targets.push(row);});this.ensureSessions();
+      this.store.change(s=>{const row={id,name:p.name.trim(),kind:p.kind,mode:p.mode,enabled:!!p.enabled,paused:same?!!previous.paused:false,quarantined:same?!!previous.quarantined:false,...(same&&previous.lastNativeVoiceReply?{lastNativeVoiceReply:previous.lastNativeVoiceReply}:{}),proactive,...(previous?.wechatPeerId?{wechatPeerId:previous.wechatPeerId}:{}),participation:{idleMs,maxMs},preferences:{style,splitReplies:p.preferences?.splitReplies===true},...(same&&previous.windowBinding?{windowBinding:previous.windowBinding}:{})};const index=s.targets.findIndex(x=>x.id===p.id);if(index>=0)s.targets[index]=row;else s.targets.push(row);});this.ensureSessions();
       if(proactive.enabled){this.policy.resumeProactive(this.sessionFor(id).id,{ownerApproved:true});this.savePolicy(this.sessionFor(id).id);}
       this.update();return true;
     }

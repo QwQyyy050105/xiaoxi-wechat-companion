@@ -17,11 +17,14 @@
 - `targets`: at most 64 unique `{id,name,kind,wechatPeerId?}` records. `id` matches `[a-z][a-z0-9_-]{0,63}`; `kind` is `group` or `contact`. Native Windows currently accepts groups only. Contacts are available to a capable custom transport, not a claim of native support.
 - `account.folder`: one folder name, never `.`/`..` or a traversal path. `cacheRoot`, when set, is an absolute attachment-cache root. `wxid`/wechatPeerId values are optional unless image-cache support is enabled. Do not infer peer IDs from names.
 - `native.enabled`: explicit opt-in, requires nonempty account binding and groups. `mediaCache` separately requires cache root, wxid and all target wechatPeerId values.
+- `native.voiceTargetIds` selects the authorized groups in which the bot processes voice. For example, set `["weekend_club"]` when `targets` contains that group ID. An empty array disables voice intake in every group. Existing deployments that omit the setting keep their previous scope. Unknown IDs, contacts and duplicates are rejected. After saving, reconnect or restart the client. The native receiver skips voice labels and detailed bubble diagnostics in excluded groups. The bot also applies this list to transcripts and audio handles supplied by a transport plugin. WeChat's own transcription preference is configured in WeChat.
 - `character.id`: stable card ID. The panel can edit card display name and call aliases. Card changes cannot grant tools or recipients.
 - `model`: default for a new state store. Existing owner settings in the panel persist independently; changes to the defaults do not silently overwrite saved selections. `apiKey` is forbidden in deployment JSON; use `apiKeyEnv`. The encrypted desktop store may hold a directly entered key.
 - `extensions`: owner-authored entries `{module:"./plugins/my_plugin.mjs", options:{...}}`. Modules must resolve inside this repo's `plugins/` directory. Restart to load code. This is trusted executable code, not a sandbox. No npm or remote module download is performed by the host.
 
 Environment variables: `XIAOXI_CONFIG` (owner file), `XIAOXI_PYTHON` (native interpreter), `CODEX_CLI_PATH` (Codex executable), `CODEX_MODEL` (default when Codex selected without a model), API key variables you name. Legacy shared voice readiness adapter optionally accepts `XIAOXI_VOICE_ROOT` / `XIAOXI_VOICE_MODULE`; the default runtime instead uses the v1 TTS plugin contract and does not start shared inference.
+
+In the panel, open **账号与授权**, tick **接收语音** beside each desired group, then save and restart. Existing groups from a legacy file with no voice list initially appear checked. Newly added groups start unchecked. Clearing a box keeps the group's text and image authorization. Removing the group or changing its type to contact removes it from the saved voice list. The panel writes only the bot's owner file.
 
 Per-target owner panel settings: `mode=mentions|observe` (plus `all` for a capable contact transport), enabled/paused, `preferences.style=natural|concise|detailed`, `splitReplies`, `participation.idleMs=10000..1800000`, `participation.maxMs>=idleMs` up to 7200000. Proactive defaults: off, minimum 20 minutes, maximum 3/day, 23:00–08:00 UTC+08 quiet hours. These are conservative defaults with explicit owner enablement, not model-generated permissions.
 
@@ -42,3 +45,13 @@ Platform connection does not perform a model call. `modelState.stage=unchecked` 
 Core error telemetry preserves recognized bounded API codes such as `api_invalid_json`, `api_invalid_stream_packet` and `model_api_http_503`. CLI/plugin failures use safe `model_*` categories; arbitrary plugin codes, response bodies and stderr do not become state or event text. These controls do not sandbox trusted plugin code or make an unavailable service available.
 
 Parallel same-request tail recovery is not included. No owner/panel switch exists, and the program never silently doubles a model request after a waiting threshold. Future support would require a new explicit opt-in with a default of `false`, budget and timeout validation; see `EXTENDING.md`. Provider retry limits and later-fresh-input circuit recovery above remain the implemented behavior.
+
+## Recovering a closed group window on Windows
+
+Open a group once in a separate WeChat window and connect it to establish its local identity. To let startup recover it later, put its configured ID in `native.backgroundRestoreTargetIds`, for example `["weekend_club"]`. The default is empty. This option targets the official standalone Windows WeChat 4.1.15.56 main window while it is minimized. Leave the group's row visible in its session list before minimizing.
+
+At startup or explicit reconnect, the receiver checks for existing windows first. For a missing selected group, it waits for at least 60 seconds without keyboard or mouse input. While waiting it checks every 15 seconds. WeChat may briefly take focus while creating its group window. If an attempt cannot be verified the receiver continues to look for the window and does not repeat the double-click in that WeChat process. Manually opened windows can be used at any time.
+
+## 后台启动控制面板
+
+维护或登录时需要静默启动，可在项目目录运行 `npm start -- --background`。客户端沿用已保存的自动连接设置。再次正常启动即可显示已有面板。

@@ -97,6 +97,20 @@
         },
         "allowModuleDataScan": {
           "type": "boolean"
+        },
+        "backgroundRestoreTargetIds": {
+          "description": "Previously bound groups for which idle-time window restoration is enabled. Disabled by default.",
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 64,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"}
+        },
+        "voiceTargetIds": {
+          "description": "Native voice intake is limited to these authorized group IDs. An empty array disables it. Omitted by legacy configurations.",
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 64,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"}
         }
       }
     },

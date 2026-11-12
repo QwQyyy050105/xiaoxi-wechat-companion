@@ -18,6 +18,13 @@ export function validateDeployment(value={}){
  if(!plain(character)||!id(character.id)||!text(character.name,64)||!character.name.trim())throw Error('deployment_character_invalid');
  const aliases=validateAliases(character.aliases??[character.name]);
  if(!plain(native)||native.enabled!==undefined&&typeof native.enabled!=='boolean'||native.mediaCache!==undefined&&typeof native.mediaCache!=='boolean'||native.allowModuleDataScan!==undefined&&typeof native.allowModuleDataScan!=='boolean')throw Error('native_config_invalid');
+ const voiceTargetIds=native.voiceTargetIds;
+ const groups=new Set(targets.filter(target=>target.kind==='group').map(target=>target.id));
+ if(voiceTargetIds!==undefined){
+  if(!Array.isArray(voiceTargetIds)||voiceTargetIds.some(targetId=>!groups.has(targetId))||new Set(voiceTargetIds).size!==voiceTargetIds.length)throw Error('native_voice_targets_invalid');
+ }
+ const restore=native.backgroundRestoreTargetIds;
+ if(restore!==undefined&&(!Array.isArray(restore)||restore.some(key=>!groups.has(key))||new Set(restore).size!==restore.length))throw Error('native_restore_targets_invalid');
  if(native.enabled===true&&(!account.displayName?.trim()||!account.folder||!targets.length||targets.some(t=>t.kind!=='group')))throw Error('native_requires_account_and_group_scopes');
  if(native.mediaCache===true&&(!native.enabled||!account.cacheRoot||!account.wxid||targets.some(t=>!t.wechatPeerId)))throw Error('media_requires_explicit_account_cache_and_peers');
  if(native.allowModuleDataScan===true&&native.mediaCache!==true)throw Error('module_scan_requires_media_opt_in');
@@ -28,7 +35,10 @@ export function validateDeployment(value={}){
  if(model.stream!==undefined&&typeof model.stream!=='boolean'||model.outputTokenField!==undefined&&!['max_tokens','max_completion_tokens'].includes(model.outputTokenField))throw Error('deployment_model_invalid');
  if(model.apiKeyEnv&&!/^[A-Za-z_][A-Za-z0-9_]*$/.test(model.apiKeyEnv))throw Error('deployment_model_invalid');
  const extensions=value.extensions??[];if(!Array.isArray(extensions)||extensions.length>16||extensions.some(x=>!plain(x)||typeof x.module!=='string'||!/^\.\/plugins\/[A-Za-z0-9_./-]+\.mjs$/.test(x.module)||x.module.split('/').includes('..')))throw Error('extensions_invalid');
- return structuredClone({schemaVersion:1,account:{displayName:account.displayName??'',folder:account.folder??'',cacheRoot:account.cacheRoot??'',wxid:account.wxid??''},targets:targets.map(t=>({id:t.id,name:t.name,kind:t.kind,...(t.wechatPeerId?{wechatPeerId:t.wechatPeerId}:{})})),character:{id:character.id,name:character.name,aliases},native:{enabled:native.enabled===true,mediaCache:native.mediaCache===true,allowModuleDataScan:native.allowModuleDataScan===true},model,extensions});
+ const nativeOptions={enabled:native.enabled===true,mediaCache:native.mediaCache===true,allowModuleDataScan:native.allowModuleDataScan===true};
+ if(voiceTargetIds!==undefined)nativeOptions.voiceTargetIds=voiceTargetIds;
+ if(restore!==undefined)nativeOptions.backgroundRestoreTargetIds=restore;
+ return structuredClone({schemaVersion:1,account:{displayName:account.displayName??'',folder:account.folder??'',cacheRoot:account.cacheRoot??'',wxid:account.wxid??''},targets:targets.map(t=>({id:t.id,name:t.name,kind:t.kind,...(t.wechatPeerId?{wechatPeerId:t.wechatPeerId}:{})})),character:{id:character.id,name:character.name,aliases},native:nativeOptions,model,extensions});
 }
 export function loadDeployment(file=DEPLOYMENT_FILE){
  if(!fs.existsSync(file))return validateDeployment({schemaVersion:1,account:{},targets:[]});

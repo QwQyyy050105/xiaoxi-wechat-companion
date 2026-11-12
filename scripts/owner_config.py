@@ -1,5 +1,6 @@
 """Owner-only deployment configuration. Never accepts config from chat payloads."""
 import json, os, pathlib, re
+from native_voice_scope import voice_target_ids
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 CONFIG_PATH=pathlib.Path(os.environ.get('XIAOXI_CONFIG',str(ROOT/'deployment.local.json'))).absolute()
 def load_owner_config():
@@ -16,6 +17,12 @@ def load_owner_config():
         if not isinstance(t,dict) or not isinstance(t.get('id'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}',t['id']) or t.get('kind') not in ('group','contact') or not isinstance(t.get('name'),str) or not t['name'].strip() or len(t['name'])>128 or t['id'] in ids or t['name'] in names:raise ValueError('deployment_target_invalid')
         if 'peerId' in t or 'windowBinding' in t or t.get('wechatPeerId') is not None and (not isinstance(t['wechatPeerId'],str) or not re.fullmatch(r'\d{1,32}@chatroom',t['wechatPeerId'])):raise ValueError('deployment_peer_id_ambiguous')
         ids.add(t['id']);names.add(t['name'])
+    voice_target_ids(native, (t['id'] for t in targets if t['kind']=='group'))
+    restore=native.get('backgroundRestoreTargetIds',[])
+    groups={t['id'] for t in targets if t['kind']=='group'}
+    if (not isinstance(restore,list) or any(not isinstance(key,str) or key not in groups for key in restore)
+            or len(set(restore))!=len(restore)):
+        raise ValueError('native_restore_targets_invalid')
     if native.get('enabled') is True and (not account.get('displayName') or not folder or not targets or any(t['kind']!='group' for t in targets)):raise ValueError('native_requires_account_and_group_scopes')
     if native.get('mediaCache') is True and (native.get('enabled') is not True or not account.get('cacheRoot') or not account.get('wxid') or any(not t.get('wechatPeerId') for t in targets)):raise ValueError('media_requires_explicit_account_cache_and_peers')
     if native.get('allowModuleDataScan') is True and native.get('mediaCache') is not True:raise ValueError('module_scan_requires_media_opt_in')

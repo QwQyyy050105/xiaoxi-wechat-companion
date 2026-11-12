@@ -10,6 +10,15 @@ function notice(message=''){$('notice').textContent=message;}
 async function call(action,payload){try{notice();return await window.xiaoxi.call(action,payload);}catch(error){notice(error.message.replace(/^Error invoking remote method '[^']+': Error: /,''));throw error;}}
 function handle(fn){return event=>{event?.preventDefault();Promise.resolve().then(()=>fn(event)).catch(()=>{});};}
 function button(text,action){const n=el('button',text);n.type='button';n.addEventListener('click',handle(action));return n;}
+function clearDraftButton(state,target){
+  const session=state.sessions.find(row=>row.channel==='desktop_wechat'&&row.peerId===target.id);
+  const last=state.outbox.filter(row=>row.sessionId===session?.id).at(-1);
+  return button('未送达，清理这条草稿',async()=>{
+    if(!last||last.status!=='unknown')throw Error('没有可核对的未确认记录');
+    await call('target.acknowledge',{id:target.id,outboxId:last.id,clearDraft:true});
+    notice('已清理核对一致的草稿，本群已恢复。');
+  });
+}
 function page(name){for(const n of document.querySelectorAll('.page'))n.classList.toggle('hidden',n.id!==name);for(const n of document.querySelectorAll('nav button'))n.classList.toggle('active',n.dataset.page===name);$('page-title').textContent=titles[name];notice();}
 for(const n of document.querySelectorAll('nav button'))n.onclick=()=>page(n.dataset.page);
 $('connect').onclick=handle(async()=>{if(state.connection.stage!=='stopped')await call('stop');await call('start');});
@@ -129,6 +138,14 @@ function render(s){
     const r=s.targetStates[t.id];const session=s.sessions.find(x=>x.channel==='desktop_wechat'&&x.peerId===t.id);const row=el('div',undefined,'row');const title=el('div',undefined,'row-title');
     title.append(el('b',t.name),el('span',t.quarantined?'发送未确认，已隔离':!t.enabled?'未启用':t.paused?'已暂停回复':s.connection.stage==='stopped'?'已停止':r?stages[r.stage]||r.stage:'等待连接','tag'));
     row.append(title,el('p',(!t.enabled?'此会话不会被监听。':t.paused?'已暂停此会话回复，可由主人恢复。':s.connection.stage==='stopped'?'点击连接后开始监听。':r?.message||'等待检查窗口')+(r?.lastOutcome?' · '+r.lastOutcome:'')));
+    if(t.lastNativeVoiceReply){
+      const receipt=t.lastNativeVoiceReply;
+      const delivery={local_echo:'本机已出现回复气泡',partial:'仅部分回复出现本机气泡',unknown:'本机发送结果待核对',not_sent:'未发送'}[receipt.status];
+      const focus=receipt.wechatForegroundObserved===true?'微信进入过前台':receipt.wechatForegroundObserved===false?'采样时微信未到前台':'前台状态未知';
+      const line=el('p','最近一次语音自动回复 · '+new Date(receipt.finishedAt).toLocaleTimeString()+' · ');
+      line.append(el('strong',delivery+'，手机送达未验证'),document.createTextNode(' · '+focus));
+      row.append(line);
+    }
     if(r?.lastVoice){
       const voiceStage={waiting_transcript:'等待微信转出文字',transcribing:'微信正在转文字',transcription_failed:'微信报告转写失败',platform_transcript:'已读到微信转写',asr_transcript:'已识别绑定录音',audio_unavailable:'绑定录音暂未识别'};
       row.append(el('p','最近语音 · '+(voiceStage[r.lastVoice.stage]||'待核对')+' · '+new Date(r.lastVoice.at).toLocaleTimeString()));
@@ -137,7 +154,7 @@ function render(s){
     for(const [label,control] of [['停止本轮','stop_current'],['换话题','change_topic']]){const n=button(label,()=>call('session.control',{sessionId:session.id,control}));n.disabled=!session;actions.append(n);}
     if(t.quarantined===true){
       row.append(el('p','上一条可能已经发送，请先在微信中核对。恢复只处理新的消息，不会重发旧回答；普通重新连接不会解除本群隔离。'));
-      actions.append(button('已核对微信，恢复本群',async()=>{await call('target.acknowledge',{id:t.id});notice('已解除本群发送隔离；连接后处理新消息，旧回答不会重发。');}));
+      actions.append(clearDraftButton(s,t),button('已核对微信，恢复本群',async()=>{await call('target.acknowledge',{id:t.id});notice('已解除本群发送隔离；连接后处理新消息，旧回答不会重发。');}));
     }
     row.append(actions);rooms.append(row);
   }
@@ -158,7 +175,67 @@ window.xiaoxi.subscribe(render);call('snapshot').then(render).catch(()=>{});
 const lines=id=>$(id).value.split('\n').map(x=>x.trim()).filter(Boolean);
 function fillPersona(s){$('persona-name').value=s.persona.name;$('persona-identity').value=s.persona.identity;for(const field of ['core','voice','preferences'])$('persona-'+field).value=(s.persona[field]??[]).join('\n');$('persona-aliases').value=(s.settings.aliases??[s.persona.name]).join('\n');$('persona-style').value=s.settings.style??'natural';}
 $('persona-form').onsubmit=handle(async()=>{const persona={...state.persona,name:$('persona-name').value,identity:$('persona-identity').value,core:lines('persona-core'),voice:lines('persona-voice'),preferences:lines('persona-preferences')};await call('persona.save',{persona,aliases:lines('persona-aliases'),style:$('persona-style').value});notice('人格、称呼与默认风格已保存，下一次回答立即生效。');});
-function scopeRow(t={id:'',name:'',kind:'group'}){const row=el('div',undefined,'row');for(const [key,label] of [['id','英文 ID'],['name','微信名称']]){const input=el('input');input.placeholder=label;input.value=t[key];input.dataset.scope=key;input.maxLength=128;row.append(input);}const select=el('select');select.dataset.scope='kind';for(const [value,label] of [['group','群聊'],['contact','联系人（自定义传输）']]){const option=el('option',label);option.value=value;select.append(option);}select.value=t.kind;row.append(select,button('移除此授权',()=>row.remove()));if(t.wechatPeerId)row.dataset.wechatPeerId=t.wechatPeerId;$('scope-list').append(row);}
+function scopeRow(target={id:'',name:'',kind:'group'}, receiveVoice=false){
+  const row=el('div',undefined,'row');
+  for(const [key,label] of [['id','英文 ID'],['name','微信名称']]){
+    const input=el('input');
+    input.placeholder=label;
+    input.value=target[key];
+    input.dataset.scope=key;
+    input.maxLength=key==='id'?64:128;
+    row.append(input);
+  }
+  const kind=el('select');
+  kind.dataset.scope='kind';
+  for(const [value,label] of [['group','群聊'],['contact','联系人（自定义传输）']]){
+    const option=el('option',label);
+    option.value=value;
+    kind.append(option);
+  }
+  kind.value=target.kind;
+  const label=el('label',undefined,'check');
+  const voice=el('input');
+  voice.type='checkbox';
+  voice.dataset.receiveVoice='';
+  voice.disabled=kind.value!=='group';
+  voice.checked=!voice.disabled && receiveVoice;
+  kind.onchange=()=>{
+    voice.disabled=kind.value!=='group';
+    if(voice.disabled)voice.checked=false;
+  };
+  label.append(voice,el('span','接收语音'));
+  row.append(kind,label,button('移除此授权',()=>row.remove()));
+  if(target.wechatPeerId)row.dataset.wechatPeerId=target.wechatPeerId;
+  $('scope-list').append(row);
+}
 $('scope-add').onclick=()=>scopeRow();
-$('deployment-form').onsubmit=handle(async()=>{if(!deploymentConfig)throw Error('配置尚未加载');const targets=[...$('scope-list').children].map(row=>Object.fromEntries([...row.querySelectorAll('[data-scope]')].map(x=>[x.dataset.scope,x.value.trim()])));for(const [i,row] of [...$('scope-list').children].entries())if(row.dataset.wechatPeerId)targets[i].wechatPeerId=row.dataset.wechatPeerId;const next={...deploymentConfig,account:{...deploymentConfig.account,displayName:$('account-name').value,folder:$('account-folder').value},targets,native:{...deploymentConfig.native,enabled:$('native-enabled').checked}};await call('deployment.save',next);deploymentConfig=next;$('restart-notice').textContent='已保存，请正常退出并重新打开。新增授权在重启前不会读取。';});
-call('deployment.get').then(config=>{deploymentConfig=config;$('account-name').value=config.account.displayName;$('account-folder').value=config.account.folder;$('native-enabled').checked=config.native.enabled;for(const target of config.targets)scopeRow(target);}).catch(()=>{});
+$('deployment-form').onsubmit=handle(async()=>{
+  if(!deploymentConfig)throw Error('配置尚未加载');
+  const targets=[],voiceTargetIds=[];
+  for(const row of $('scope-list').children){
+    const target=Object.fromEntries([...row.querySelectorAll('[data-scope]')].map(x=>[x.dataset.scope,x.value.trim()]));
+    if(target.kind==='group'){
+      if(row.dataset.wechatPeerId)target.wechatPeerId=row.dataset.wechatPeerId;
+      if(row.querySelector('[data-receive-voice]').checked)voiceTargetIds.push(target.id);
+    }
+    targets.push(target);
+  }
+  const next={...deploymentConfig,
+    account:{...deploymentConfig.account,displayName:$('account-name').value,folder:$('account-folder').value},
+    targets,native:{...deploymentConfig.native,enabled:$('native-enabled').checked,voiceTargetIds}};
+  if(next.native.backgroundRestoreTargetIds){
+    const groups=new Set(targets.filter(target=>target.kind==='group').map(target=>target.id));
+    next.native.backgroundRestoreTargetIds=next.native.backgroundRestoreTargetIds.filter(id=>groups.has(id));
+  }
+  await call('deployment.save',next);
+  deploymentConfig=next;
+  $('restart-notice').textContent='已保存，请正常退出并重新打开。新增授权在重启前不会读取。';
+});
+call('deployment.get').then(config=>{
+  deploymentConfig=config;
+  $('account-name').value=config.account.displayName;
+  $('account-folder').value=config.account.folder;
+  $('native-enabled').checked=config.native.enabled;
+  const selected=config.native.voiceTargetIds;
+  for(const target of config.targets)scopeRow(target,selected===undefined || selected.includes(target.id));
+}).catch(()=>{});

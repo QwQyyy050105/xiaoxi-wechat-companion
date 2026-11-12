@@ -12,6 +12,48 @@ from types import SimpleNamespace
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'scripts'))
 from desktop_bridge import Bridge
 
+class WindowEnumerationPrivacy(unittest.TestCase):
+    def test_window_titles_are_read_only_after_pid_selection(self):
+        import desktop_bridge as d
+        inspected=[]
+        def enum_windows(callback,_):
+            for hwnd in (1,2):callback(hwnd,0)
+            return True
+        def get_pid(hwnd,target):target._obj.value={1:20,2:21}[hwnd]
+        def get_title(hwnd,target,_limit):inspected.append(hwnd);target.value={1:'Example Group',2:'Unrelated conversation'}[hwnd]
+        def get_class(_hwnd,target,_limit):target.value='QtSynthetic'
+        def get_rect(_hwnd,target):
+            target._obj.left=0;target._obj.top=0;target._obj.right=900;target._obj.bottom=700
+        api=SimpleNamespace(EnumWindows=enum_windows,EnumChildWindows=lambda *_:True,
+            GetWindowThreadProcessId=get_pid,GetWindowTextW=get_title,GetClassNameW=get_class,
+            GetWindowRect=get_rect,IsIconic=lambda _:False)
+        with patch.object(d,'U',api):
+            self.assertEqual(d.windows(),[{'pid':20},{'pid':21}])
+            self.assertEqual(inspected,[])
+            self.assertEqual(d.windows(20),[dict(pid=20,hwnd=1,title='Example Group',klass='QtSynthetic',width=900,height=700)])
+            self.assertEqual(inspected,[1])
+
+    def test_embedded_child_is_discovered_without_reading_other_account_titles(self):
+        import desktop_bridge as d
+        inspected=[]
+        def enum_windows(callback,_):callback(1,0);return True
+        def enum_children(_host,callback,_):
+            for hwnd in (2,3):callback(hwnd,0)
+            return True
+        def get_pid(hwnd,target):target._obj.value={1:9,2:20,3:21}[hwnd]
+        def get_title(hwnd,target,_limit):inspected.append(hwnd);target.value={2:'',3:'Private chat'}[hwnd]
+        def get_class(_hwnd,target,_limit):target.value='QtSynthetic'
+        def get_rect(_hwnd,target):
+            target._obj.left=0;target._obj.top=0;target._obj.right=900;target._obj.bottom=700
+        api=SimpleNamespace(EnumWindows=enum_windows,EnumChildWindows=enum_children,
+            GetWindowThreadProcessId=get_pid,GetWindowTextW=get_title,GetClassNameW=get_class,
+            GetWindowRect=get_rect,IsIconic=lambda _:False)
+        with patch.object(d,'U',api):
+            self.assertEqual(d.windows(),[{'pid':9},{'pid':20},{'pid':21}])
+            self.assertEqual(inspected,[])
+            self.assertEqual(d.windows(20),[{'hwnd':2,'pid':20,'title':'','klass':'QtSynthetic','width':900,'height':700}])
+            self.assertEqual(inspected,[2])
+
 class IdentityDiagnostics(unittest.TestCase):
     def bridge(self):
         b=object.__new__(Bridge)
@@ -380,14 +422,16 @@ class NavigationPrivacy(unittest.TestCase):
                 self.assertGreater(container.children_reads,0)
                 for node in (messages,draft,bubble):self.assertEqual(node.children_reads,0)
 
-    def test_explicit_open_only_clicks_the_verified_session_row(self):
+    def test_reconnect_without_opt_in_never_activates_or_clicks_the_account(self):
         import desktop_bridge as d
         root,target,other,*_=self.navigation();b=object.__new__(Bridge);b.pid=20;b.main=10
-        b.targets=[{'id':'group_abao','name':'Example Group A','kind':'group'}];b.check=lambda *_:None;b.read=lambda name:{'group':name}
+        b.pending_restores={};b.restore_targets=frozenset()
+        b.target=lambda name:{'id':'room','name':name,'kind':'group'};b.check=lambda *_:None
         with patch.object(d,'windows',return_value=[]),patch.object(d.auto,'ControlFromHandle',return_value=root),patch.object(d,'foreground') as activate:
-            self.assertEqual(b.open_room('Example Group A',True),{'group':'Example Group A'})
-            activate.assert_called_once_with(10)
-        self.assertTrue(target.clicked);self.assertFalse(other.clicked)
+            with self.assertRaisesRegex(RuntimeError,'手动打开该群'):b.open_room('Example Group A',True)
+            activate.assert_not_called()
+        self.assertFalse(target.clicked);self.assertFalse(other.clicked)
+
 
     def test_malformed_or_duplicate_configuration_cannot_replace_the_authorized_registry(self):
         import owner_config as owner,json,tempfile

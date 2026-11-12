@@ -7,6 +7,7 @@ import {validateWave, MAX_WAVE_BYTES} from '../src/local_asr.mjs';
 import {createMediaService} from '../src/media_service.mjs';
 import {Companion} from '../src/core.mjs';
 import {MessageGate} from '../src/message_gate.mjs';
+import {VoiceIntakeScope} from '../src/voice_scope.mjs';
 
 function wave(samples = 800) {
   const b=Buffer.alloc(44+samples*2);
@@ -100,6 +101,26 @@ test('native placeholder and unauthorized group never open any attachment',async
   core.ingest(target,voice('未播放'),frame([]));
   core.ingest({...target,id:'unknown',name:'unknown'},row,frame([]));await idle(core);
   assert.deepEqual(resolved,[]);assert.deepEqual(calls,[]);
+});
+test('custom transport audio for a voice-disabled authorized room never reaches the resolver',async t=>{
+  const {core,calls,resolved,target,row}=fixture(t);
+  core.voiceScope=new VoiceIntakeScope(()=>[target.id]);
+  const other=core.store.value.targets.find(room=>room.id!==target.id);
+  core.ingest(other,row,frame([]));
+  await core.transcribeIncomingVoice(other,core.sessionFor(other.id),row,frame([]));
+  await idle(core);
+  assert.deepEqual(resolved,[]);assert.deepEqual(calls,[]);
+});
+test('revoking voice scope while a transcript is pending suppresses its result',async t=>{
+  let complete;
+  const {core,target,row,sent,calls}=fixture(t,{asr:()=>new Promise(resolve=>{complete=resolve;})});
+  core.ingest(target,row,frame([]));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(typeof complete,'function');
+  core.voiceScope=new VoiceIntakeScope(()=>[]);
+  complete({text:'小汐，别回复这条',confidence:.99});
+  await idle(core);
+  assert.deepEqual(sent,[]);assert.deepEqual(calls,[]);
 });
 test('mismatched message, or an owner-uploaded file, cannot transcribe into a group',async t=>{
   for(const asset of [{messageId:'other'}, {source:'owner_upload'}]){

@@ -67,6 +67,7 @@ def fixture(count=100):
     bridge.created = 100
     bridge.check = lambda *args: None
     bridge.targets = [dict(id=target_id, name=name, kind='group')]
+    bridge.voice_targets = frozenset((target_id,))
     def room(_, *, chrome_out=None):
         if chrome_out is not None:chrome_out.extend(d.walk_chrome(root))
         return root, 7

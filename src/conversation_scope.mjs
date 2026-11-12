@@ -70,7 +70,7 @@ export function assertScopedNativeRequest(command,fields={}) {
     for(const target of targets)if(!approvedFor(target)||!uniqueConfigured(target,targets))throw scopeError('native_target_unapproved');
     return true;
   }
-  if(['open','read','send','probe_input'].includes(command)){
+  if(['open','read','send','probe_input','clear_unknown_draft'].includes(command)){
     if(!APPROVED.some(scope=>scope.name===own(fields,'group')))throw scopeError('native_group_unapproved');
     return true;
   }

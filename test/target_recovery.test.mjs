@@ -4,6 +4,44 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {Companion} from '../src/core.mjs';
 
+for (const stage of ['clean','changedDraft','lateEcho','newerRecord']) {
+  test('draft recovery through owner panel dispatch: '+stage,async t=>{
+    const {core,target}=fixture(t,()=>{});
+    const session=core.sessionFor(targetId);
+    const voice={id:'source',nativeId:'native-source',klass:'mmui::ChatTextItemView',text:'test question'};
+    const fields={group:target.name,...snapshot([]),messages:[voice],draft:true};
+    core.store.change(s=>{
+      s.inbox.push({id:'req',key:`100/1/${target.id}/source/${voice.klass}/test question`,sessionId:session.id,event:{id:voice.id,text:voice.text}});
+      s.outbox.push({id:'out',sessionId:session.id,text:'43',status:'unknown',requestIds:['req']});
+    });
+    const commands=[];
+    core.bridge.call=async (command,payload,timeout,options)=>{
+      commands.push(command);
+      if(command==='read'){
+        if(commands.length===1&&stage==='newerRecord')core.store.change(s=>s.outbox.push({id:'other',sessionId:session.id,status:'prepared'}));
+        return structuredClone(fields);
+      }
+      assert.equal(command,'clear_unknown_draft');
+      assert.equal(options.beforeSubmit(),true);
+      assert.equal(payload.anchorId,'native-source');
+      assert.equal(payload.text,'43');
+      if(stage==='changedDraft')throw Error('草稿已变化');
+      fields.draft=false;
+      if(stage==='lateEcho')fields.messages.push({...voice,id:'echo',nativeId:'echo',text:'43'});
+      return {cleared:true};
+    };
+    const pending=core.dispatch('target.acknowledge',{id:target.id,outboxId:'out',clearDraft:true});
+    if(stage==='clean')await pending;
+    else await assert.rejects(pending);
+    assert.equal(core.store.value.targets.find(t=>t.id===target.id).quarantined,stage!=='clean');
+    const out=core.store.value.outbox.find(row=>row.id==='out');
+    assert.equal(out.status,'unknown');
+    assert.equal(!!out.draftClearedAt,stage==='clean');
+    assert.equal(commands.includes('send'),false);
+    if(stage==='newerRecord')assert.equal(commands.includes('clear_unknown_draft'),false);
+  });
+}
+
 const targetId='group_abao';
 const row=id=>({id,text:`小汐 ${id}`,klass:'mmui::ChatTextItemView'});
 const snapshot=ids=>({pid:20,created:100,hwnd:1,windowBinding:'test:abao',messages:ids.map(row),draft:false});

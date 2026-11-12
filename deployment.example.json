@@ -17,7 +17,9 @@
   "native": {
     "enabled": false,
     "mediaCache": false,
-    "allowModuleDataScan": false
+    "allowModuleDataScan": false,
+    "voiceTargetIds": [],
+    "backgroundRestoreTargetIds": []
   },
   "model": {
     "provider": "mock",

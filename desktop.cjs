@@ -3,13 +3,18 @@ const fs=require('node:fs');const path=require('node:path');const {pathToFileURL
 const root=__dirname;
 const appVersion=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version;
 const verifyStartup=process.argv.includes('--verify-startup');
+const backgroundStartup=process.argv.includes('--background');
 for(const folder of ['temp','data','logs','runtime/client_profile','runtime/client_session'])fs.mkdirSync(path.join(root,folder),{recursive:true});
 process.env.TEMP=path.join(root,'temp');process.env.TMP=process.env.TEMP;
 app.setPath('userData',path.join(root,'runtime/client_profile'));app.setPath('sessionData',path.join(root,'runtime/client_session'));app.setPath('temp',path.join(root,'temp'));app.setPath('logs',path.join(root,'logs'));
 app.setAppUserModelId('Xiaoxi.Companion');
 if(!app.requestSingleInstanceLock()){app.quit();return;}
 let win,core,closing=false;
-app.on('second-instance',()=>{if(win){if(win.isMinimized())win.restore();win.show();win.focus();}});
+app.on('second-instance',(_event,argv)=>{
+  if(!win||argv.includes('--background'))return;
+  if(win.isMinimized())win.restore();
+  win.show();win.focus();
+});
 const runFile=path.join(root,'data/client_run.json');
 function runReceipt(clean){fs.writeFileSync(runFile,JSON.stringify({pid:process.pid,at:new Date().toISOString(),cleanShutdown:clean}),{flush:true});}
 app.whenReady().then(async()=>{
@@ -20,7 +25,7 @@ app.whenReady().then(async()=>{
     let last;try{last=JSON.parse(fs.readFileSync(runFile,'utf8'));}catch{}
     if(last&&!last.cleanShutdown)core.store.event('检测到上次异常退出；已保留设置和记忆，发送结果未知的任务不会补发。');
     runReceipt(false);
-    win=new BrowserWindow({width:1080,height:820,minWidth:880,minHeight:640,title:'小汐 · Xiaoxi Companion',show:!verifyStartup,autoHideMenuBar:true,backgroundColor:'#f5f6f8',
+    win=new BrowserWindow({width:1080,height:820,minWidth:880,minHeight:640,title:'小汐 · Xiaoxi Companion',show:!verifyStartup&&!backgroundStartup,autoHideMenuBar:true,backgroundColor:'#f5f6f8',
       webPreferences:{preload:path.join(root,'desktop_preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
     const allowed=pathToFileURL(path.join(root,'public/client.html')).href;
     win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
@@ -41,7 +46,7 @@ app.whenReady().then(async()=>{
       if(win&&!win.isDestroyed())win.webContents.send('xiaoxi:state',state);
       const diagnostic=JSON.stringify([state.modelInput?.callId,state.modelInput?.stage,state.personaStatus?.sha256,state.personaStatus?.lastError?.code,state.latency?.recent.at(-1)?.requestId]);
       if(Date.now()-lastStatus>3000||diagnostic!==lastDiagnostic){lastStatus=Date.now();lastDiagnostic=diagnostic;
-        const status={at:new Date().toISOString(),pid:process.pid,appVersion,privacy:state.privacy,media:state.mediaStatus,mediaCapabilities:state.mediaCapabilities,searchEnabled:state.settings.allowSearch===true,personaVersion:core.persona.schema_version,persona:state.personaStatus,modelInput:state.modelInput,latency:state.latency,connection:state.connection,model:state.modelState.stage,modelHealth:state.modelHealth,targets:state.targetStates,busy:state.busy.length,inbox:state.inbox.map(({status})=>status),outbox:state.outbox.map(({status})=>status),memoryCount:state.memories.length};
+        const status={at:new Date().toISOString(),pid:process.pid,appVersion,privacy:state.privacy,media:state.mediaStatus,mediaCapabilities:state.mediaCapabilities,searchEnabled:state.settings.allowSearch===true,personaVersion:core.persona.schema_version,persona:state.personaStatus,modelInput:state.modelInput,latency:state.latency,connection:state.connection,model:state.modelState.stage,modelHealth:state.modelHealth,targets:state.targetStates,voiceReplies:Object.fromEntries(state.targets.filter(t=>t.lastNativeVoiceReply).map(t=>[t.id,t.lastNativeVoiceReply])),busy:state.busy.length,inbox:state.inbox.map(({status})=>status),outbox:state.outbox.map(({status})=>status),memoryCount:state.memories.length};
         fs.writeFileSync(path.join(root,'data/runtime_status.json'),JSON.stringify(status,null,2));
       }
     });

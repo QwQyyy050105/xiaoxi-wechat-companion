@@ -2,7 +2,12 @@ import {spawn} from 'node:child_process';
 import path from 'node:path';
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 import {assertScopedNativeRequest} from './conversation_scope.mjs';
+
+const nativeSendResults = new WeakSet();
+const bundledWorker = fileURLToPath(new URL('../scripts/desktop_bridge.py',import.meta.url));
+export function isNativeWeChatSend(result) { return nativeSendResults.has(result); }
 
 export class DesktopTransport extends EventEmitter {
   constructor(root,{workerPath,pythonPath}={}){super();this.root=root;this.workerPath=workerPath||path.join(root,'scripts/desktop_bridge.py');this.pythonPath=pythonPath||process.env.XIAOXI_PYTHON||path.join(root,process.platform==='win32'?'runtime/desktop_bridge/Scripts/python.exe':'runtime/desktop_bridge/bin/python');this.child=null;this.requests=new Map();this.serial=0;this.tail=Promise.resolve();this.worker=null;this.termination=null;}
@@ -28,6 +33,11 @@ export class DesktopTransport extends EventEmitter {
           if (value.code === 'viewport_pending') error.code = value.code;
           waiting.reject(error);
         } else {
+          if (waiting.command === 'send' && this.handshake && process.platform === 'win32' &&
+              path.relative(bundledWorker,this.workerPath) === '' &&
+              value.result && [true,false,null].includes(value.result.wechatForegroundObserved)) {
+            nativeSendResults.add(value.result);
+          }
           waiting.resolve(value.result);
         }
       }
@@ -67,7 +77,7 @@ export class DesktopTransport extends EventEmitter {
         assertScopedNativeRequest(command,payload);line=JSON.stringify(payload)+'\n';
       }catch(error){error.sendNotSubmitted=true;return reject(error);}
       const timer=setTimeout(()=>this.kill('微信接口超时，已释放连接；请重试'),timeout);
-      this.requests.set(id,{resolve,reject,timer});this.child.stdin.write(line);
+      this.requests.set(id,{command,resolve,reject,timer});this.child.stdin.write(line);
     });
     const result=this.tail.then(run,run);this.tail=result.catch(()=>{});return result;
   }
