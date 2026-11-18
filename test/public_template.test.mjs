@@ -19,6 +19,28 @@ const config=()=>({schemaVersion:1,account:{},character:{id:'xiaoxi',name:'å°æ±
 const settings=(extra={})=>({provider:'compatible',model:'chosen-model',baseUrl:'https://model.invalid/v1',stream:false,retries:0,...extra});
 const result=text=>new Response(JSON.stringify({choices:[{message:{content:text}}]}),{headers:{'content-type':'application/json'}});
 
+test('offline doctor reports the verified Windows adapters and the current voice acceptance boundary', t => {
+  const cwd = fixture(t);
+  const file = path.join(cwd, 'deployment.local.json');
+  const run = spawnSync(process.execPath, [path.join(root, 'scripts/cli.mjs'), 'doctor', '--json'], {
+    cwd, encoding: 'utf8', windowsHide: true, timeout: 10000,
+    env: {...process.env, XIAOXI_CONFIG: file}
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const report = JSON.parse(run.stdout);
+  assert.equal(report.configuration, 'not_initialized');
+  assert.equal(report.native.validation, 'not_connected_by_doctor');
+  assert.equal(report.native.validatedWeChat, '4.1.15.56');
+  assert.equal(report.native.verifiedAdapters['4.1.15.56'].imageCache, 'optional');
+  const current = report.native.verifiedAdapters['4.2.0.53'];
+  assert.equal(current.mode, 'uia_standalone');
+  assert.deepEqual(current.verified, ['minimized_group_read', 'background_text_send']);
+  assert.equal(current.firstGroupBinding, 'open_authorized_group_window_then_connect_in_panel');
+  assert.equal(current.imageCache, 'disabled');
+  assert.equal(current.automaticVoiceReply, 'pending_live_end_to_end');
+  assert.equal(fs.existsSync(file), false);
+});
+
 test('panel refuses the offline smoke flag before loading owner extensions', t => {
   const cwd = fixture(t);
   const file = path.join(cwd, 'deployment.local.json');

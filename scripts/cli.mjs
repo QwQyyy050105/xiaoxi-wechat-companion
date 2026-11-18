@@ -17,7 +17,37 @@ if(command==='init'){
  const {resolveCodex}=await import('../src/model.mjs');
  const config=loadDeployment();let codex=false;try{codex=!!await resolveCodex();}catch{}
  const native=config.native.enabled&&process.platform==='win32';
- const report={ok:true,configuration:fs.existsSync(DEPLOYMENT_FILE)?'configured':'not_initialized',modelProvider:config.model.provider,credential:config.model.apiKeyEnv?(process.env[config.model.apiKeyEnv]?'environment_present':'environment_missing'):'not_configured',remoteCredentialUnconfigured:config.model.provider==='compatible'&&!config.model.apiKeyEnv,codexInstalled:codex,targets:config.targets.length,native:{status:native?'requires_explicit_connection_check':'disabled_or_unsupported',platform:process.platform,validatedWeChat:'4.1.15.56',validation:'not_connected_by_doctor'},demo:'available_offline',note:'Doctor does not log in, call a model, read chats, or change system settings.'};
+ const legacyBuild = '4.1.15.56';
+ const report = {
+  ok: true,
+  configuration: fs.existsSync(DEPLOYMENT_FILE) ? 'configured' : 'not_initialized',
+  modelProvider: config.model.provider,
+  credential: config.model.apiKeyEnv ? (process.env[config.model.apiKeyEnv] ? 'environment_present' : 'environment_missing') : 'not_configured',
+  remoteCredentialUnconfigured: config.model.provider === 'compatible' && !config.model.apiKeyEnv,
+  codexInstalled: codex,
+  targets: config.targets.length,
+  native: {
+   status: native ? 'requires_explicit_connection_check' : 'disabled_or_unsupported',
+   platform: process.platform,
+   validatedWeChat: legacyBuild,
+   validation: 'not_connected_by_doctor',
+   verifiedAdapters: {
+    [legacyBuild]: {
+     verified: ['group_text_receive', 'background_text_send', 'wechat_voice_transcript'],
+     imageCache: 'optional'
+    },
+    '4.2.0.53': {
+     mode: 'uia_standalone',
+     verified: ['minimized_group_read', 'background_text_send'],
+     firstGroupBinding: 'open_authorized_group_window_then_connect_in_panel',
+     imageCache: 'disabled',
+     automaticVoiceReply: 'pending_live_end_to_end'
+    }
+   }
+  },
+  demo: 'available_offline',
+  note: 'Doctor does not log in, call a model, read chats, or change system settings.'
+ };
  console.log(json?JSON.stringify(report):JSON.stringify(report,null,2));
 }else if(command==='native-prepare'){
  if(process.platform!=='win32')throw Error('unsupported_platform: Windows required');
