@@ -20,9 +20,14 @@ export function validateGroupImages(value,session){
   });
 }
 
+export function supportsGroupImageCache(connection) {
+  return connection?.version === '4.1.15.56' && !connection.nativeMode;
+}
+
 export function readGroupImages({root,session,connection,signal}){
   assertConversationScope(session,getAuthorizedWechatScopes());
   if(!deployment.native.mediaCache||connection?.stage!=='connected'||connection.account!==deployment.account.displayName||!Number.isInteger(connection.pid)||!Number.isFinite(connection.created))return Promise.resolve({ok:false,reason:'media_connection_unverified',images:[]});
+  if (!supportsGroupImageCache(connection)) return Promise.resolve({ok:false,reason:'unsupported_wechat_build',images:[]});
   signal?.throwIfAborted();
   return new Promise(resolve=>{
     const child=spawn(process.env.XIAOXI_PYTHON||path.join(root,process.platform==='win32'?'runtime/desktop_bridge/Scripts/python.exe':'runtime/desktop_bridge/bin/python'),['-B',path.join(root,'scripts/wechat_media_cache.py')],{cwd:root,windowsHide:true,env:{...process.env,TEMP:path.join(root,'temp'),TMP:path.join(root,'temp'),PYTHONDONTWRITEBYTECODE:'1'},stdio:['pipe','pipe','ignore']});
@@ -50,7 +55,7 @@ export class GroupMediaInput {
     return intent.image||!!(prior&&prior.epoch===session.epoch&&this.nowMs()-prior.at<120000&&reference);
   }
   async prepare({session,request,connection,signal}){
-    if(session.channel!=='desktop_wechat')return null;
+    if(session.channel!=='desktop_wechat' || connection?.nativeMode?.startsWith('uia_'))return null;
     assertConversationScope(session,getAuthorizedWechatScopes());
     const intent=classifyMediaRequest(request.text);
     if(intent.voiceInput)return null;

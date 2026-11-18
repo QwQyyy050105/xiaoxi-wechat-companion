@@ -7,6 +7,7 @@ import psutil
 import uiautomation as auto
 from native_draft_recovery import clear_verified_draft
 from native_message_tracker import NativeMessageTracker
+from wechat_build import LEGACY_BUILD, STANDALONE_SEND_BUILD, verified_build
 from native_voice_scope import TEXT_AND_IMAGE_ROWS
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -286,6 +287,34 @@ def authorized_session_item(root,name,limit=400):
     if len(matches)!=1:raise RuntimeError('已授权群的会话入口不唯一或导航结构未验证，请手动打开该群独立窗口')
     return matches[0]
 
+def main_window_candidates(rows,pid,limit=12):
+    """Choose only plausible main HWNDs in the already bound Weixin process."""
+    titles={'','微信','Weixin','WeChat'}
+    candidates=[row for row in rows if row.get('pid')==pid and row.get('title') in titles
+                and row.get('klass','').startswith('Qt') and row.get('width',0)>=600
+                and row.get('height',0)>=350]
+    if len(candidates)>limit:raise RuntimeError('该账号的微信主窗口候选过多，请手动打开已授权群独立窗口')
+    return candidates
+
+def bound_main_window(rows,pid):
+    """Locate an embedded Weixin main HWND using root metadata only.
+
+    Some multi-account hosts give the Weixin child an empty Win32 title. Never
+    inspect a titled chat window, another PID, or any session preview here.
+    The verified navigation row is selected separately by authorized_session_item.
+    """
+    matches=[]
+    for row in main_window_candidates(rows,pid):
+        try:
+            root=auto.ControlFromHandle(row['hwnd'])
+            if (root.ClassName=='mmui::MainWindow' and root.ControlTypeName=='WindowControl'
+                    and root.NativeWindowHandle==row['hwnd']):matches.append(row['hwnd'])
+        except (LookupError,RuntimeError,AttributeError):
+            # A transient/unsupported Qt child is not evidence of a main window.
+            continue
+    if len(matches)>1:raise RuntimeError('该账号的微信主窗口不唯一，请关闭重复窗口后重试')
+    return matches[0] if matches else None
+
 def rect(control):
     r=control.BoundingRectangle
     return [r.left,r.top,r.right,r.bottom]
@@ -293,6 +322,10 @@ def rect(control):
 def foreground(hwnd):
     U.ShowWindow(hwnd,9);U.SetForegroundWindow(hwnd);time.sleep(.15)
     if U.GetForegroundWindow()!=U.GetAncestor(hwnd,2):raise RuntimeError('请展开Example Account的目标微信窗口后重试；未发送键鼠输入')
+
+class MissingGroupWindow(RuntimeError):
+    """The verified account has zero windows with this group's exact title."""
+
 
 class Bridge:
     def __init__(self):
@@ -376,7 +409,8 @@ class Bridge:
         try:
             p=psutil.Process(self.pid)
             if p.name().lower()!='weixin.exe' or abs(p.create_time()-self.created)>.001:raise RuntimeError('微信已退出，请重新登录Example Account')
-            if not self.guard or self.guard.poll() is not None:raise RuntimeError('兼容接口已停止')
+            if not getattr(self,'system_uia',False) and (not self.guard or self.guard.poll() is not None):
+                raise RuntimeError('兼容接口已停止')
             if identity or time.monotonic()-self.last_identity>10:
                 identity_started=time.perf_counter()
                 if identity_folders(p)!=[self.config['account']['binding']['account_folder']]:raise RuntimeError('当前微信身份发生变化，已暂停')
@@ -393,20 +427,33 @@ class Bridge:
         binding=self.config['account'].get('binding')
         if not binding or not binding.get('account_folder'):raise RuntimeError('尚未绑定Example Account的本机身份')
         possible={x['pid'] for x in windows()}
-        found=[]; denied=[]
+        found=[]; denied=[]; other_account=False
         for pid in possible:
             try:
                 p=psutil.Process(pid)
-                if p.name().lower()=='weixin.exe' and identity_folders(p)==[binding['account_folder']]:found.append(p)
+                if p.name().lower()!='weixin.exe':continue
+                identities=identity_folders(p)
+                if identities==[binding['account_folder']]:found.append(p)
+                elif identities:other_account=True
             except psutil.NoSuchProcess:pass
             except psutil.AccessDenied:denied.append(pid)
         if not found and denied:raise RuntimeError(IDENTITY_PERMISSION_NOTE)
-        if len(found)!=1:raise RuntimeError('等待登录Example Account并展开微信主窗口；匹配账号数：'+str(len(found)))
+        if len(found)!=1:
+            note='；已检测到其他微信账号' if other_account and not found else ''
+            raise RuntimeError('等待登录'+CONFIG['account']['displayName']+'并打开微信窗口；匹配账号数：'+str(len(found))+note)
         process=found[0]
         try:created=process.create_time()
         except psutil.AccessDenied as error:raise RuntimeError(IDENTITY_PERMISSION_NOTE) from error
         except psutil.NoSuchProcess as error:raise RuntimeError('微信已退出，请重新登录Example Account') from error
         self.pid=process.pid;self.created=created
+        version=verified_build(process.exe())
+        self.system_uia=version!=LEGACY_BUILD
+        if self.system_uia:
+            self.check(True)
+            self.main=bound_main_window(windows(self.pid),self.pid) if version==STANDALONE_SEND_BUILD else None
+            self.uia_readonly=not self.main
+            mode='uia_readonly' if self.uia_readonly else 'uia_standalone'
+            return dict(pid=self.pid,created=self.created,account=CONFIG['account']['displayName'],version=version,nativeMode=mode)
         wins=windows(self.pid)
         main=[x for x in wins if x['pid']==self.pid and x['title'] in ('微信','Weixin','WeChat') and x['width']>=600 and x['height']>=350]
         if len(main)!=1:raise RuntimeError('微信主窗口不唯一，请在多开神器中拆分Example Account窗口')
@@ -422,18 +469,28 @@ class Bridge:
                 except Exception:break
         threading.Thread(target=heartbeat,daemon=True).start()
         self.check(True)
-        return dict(pid=self.pid,created=self.created,account=CONFIG['account']['displayName'],version='4.1.15.56')
+        return dict(pid=self.pid,created=self.created,account=CONFIG['account']['displayName'],version=version)
 
-    def room(self,name,*,chrome_out=None):
+    def room(self,name,*,chrome_out=None,bind_open_group=False):
+        from native_window_restore import matching_windows, standalone
         target=self.target(name)
-        self.check()
+        first_binding=getattr(self,'system_uia',False) and not target.get('windowBinding')
+        if first_binding and not (bind_open_group and not getattr(self,'uia_readonly',False) and target['kind']=='group'):
+            raise RuntimeError('请先核对并绑定该群的独立窗口标识：双击已授权群打开独立窗口，再在面板点连接小汐')
+        if first_binding:self.check(True)
+        else:self.check()
         desktop_ready()
-        matches=[x for x in windows(self.pid) if x['pid']==self.pid and x['title']==name]
-        if len(matches)!=1:raise RuntimeError('请打开群“'+name+'”的独立窗口（双击会话），找到 '+str(len(matches))+' 个')
-        row=matches[0]
+        if first_binding:
+            # Exact-title lookup uses the registered account PID and only returns matching top-level HWNDs.
+            handles=matching_windows(self.pid,name)
+        else:
+            handles=[x['hwnd'] for x in windows(self.pid) if x['pid']==self.pid and x['title']==name]
+        if not handles:raise MissingGroupWindow('请打开群“'+name+'”的独立窗口（双击会话），找到 0 个')
+        if len(handles)!=1:raise RuntimeError('请打开群“'+name+'”的独立窗口（双击会话），找到 '+str(len(handles))+' 个')
+        hwnd=next(iter(handles))
         # UI Automation can expose the Qt tree while minimized. Validate the
         # semantic identity below instead of refusing solely on window state.
-        root=auto.ControlFromHandle(row['hwnd'])
+        root=auto.ControlFromHandle(hwnd)
         if root.ClassName!='mmui::ChatSingleWindow':raise RuntimeError('窗口类型不匹配')
         peer=root.AutomationId
         if not peer.startswith('ChatSingleWindow') or len(peer)<=len('ChatSingleWindow'):raise RuntimeError('缺少稳定会话标识')
@@ -444,34 +501,75 @@ class Bridge:
         # Group kind is verified rather than accepting a same-named private contact.
         is_group=any(x.ClassName=='mmui::ChatTitleBarChatRoomView' for x in chrome)
         if is_group!=(target['kind']=='group'):raise RuntimeError('会话类型不匹配')
+        if first_binding:
+            group_peer=re.fullmatch(r'ChatSingleWindow([0-9]{1,32}@chatroom)',peer)
+            configured=next((row.get('wechatPeerId') for row in CONFIG['targets'] if row['id']==target['id']),None)
+            if not group_peer or configured and group_peer[1]!=configured:
+                raise RuntimeError('群的稳定标识与授权配置不匹配')
+            self.check(True)
+            if matching_windows(self.pid,name)!={hwnd} or not standalone(hwnd,self.pid):
+                raise RuntimeError('首次绑定时群独立窗口发生变化，请核对后重连')
+            fresh=auto.ControlFromHandle(hwnd)
+            if (fresh.NativeWindowHandle!=hwnd or fresh.ClassName!='mmui::ChatSingleWindow'
+                    or fresh.AutomationId!=peer):
+                raise RuntimeError('首次绑定时群标识发生变化，请核对后重连')
         target['windowBinding']=peer
         if chrome_out is not None:chrome_out.extend(chrome)
-        return root,row['hwnd']
+        return root,hwnd
 
-    def open_room(self,name,allow_foreground=False):
+    def can_restore_bound_room(self,target):
+        return (not getattr(self,'system_uia',False) and not getattr(self,'uia_readonly',False) and self.main
+                and target['kind']=='group' and target['id'] in self.restore_targets
+                and (target.get('windowBinding') or '').startswith('ChatSingleWindow'))
+
+    def open_room(self,name,allow_foreground=False,bind_open_group=False):
         from native_window_restore import WaitForIdle, restore_group
         target=self.target(name)
         self.check(True)
-        if any(row['title']==name for row in windows(self.pid)):
+        if bind_open_group and getattr(self,'system_uia',False) and not target.get('windowBinding'):
+            # Confirm metadata only, then rebuild the snapshot through the normal pinned read.
+            self.room(name,bind_open_group=True)
+            result=self.read(name)
             self.pending_restores.pop(name,None)
-            return self.read(name)
-        selected=self.restore_targets
-        if not allow_foreground or target['id'] not in selected:
+            return result
+        if any(row['title']==name for row in windows(self.pid)):
+            result=self.read(name)
+            self.pending_restores.pop(name,None)
+            return result
+        if not self.can_restore_bound_room(target):
             raise RuntimeError('本群尚无独立窗口，请在微信中手动打开该群')
-        if not self.main:
-            raise RuntimeError('未找到独立微信主窗口，请在微信中手动打开该群')
+        if name in self.pending_restores and self.pending_restores[name] is None:
+            raise RuntimeError('本次恢复未确认，请手动打开该群')
+        if not allow_foreground:
+            self.pending_restores.setdefault(name,time.monotonic()+15)
+            raise RuntimeError('群窗口缺失，等待电脑空闲后恢复')
         try:
             restore_group(self,target,target.get('windowBinding'),auto.ControlFromHandle,authorized_session_item,
                           focus_state,desktop_ready,ROOT/'data'/('background_open_'+target['id']+'.json'))
         except WaitForIdle:
             self.pending_restores[name]=time.monotonic()+15
             raise
-        return self.read(name)
+        except Exception:
+            # Keep checking for a manually opened window, without resubmitting.
+            self.pending_restores[name]=None
+            raise
+        self.pending_restores[name]=None
+        result=self.read(name)
+        self.pending_restores.pop(name,None)
+        return result
 
     def poll_room(self,name,diagnostic=False):
+        if diagnostic:return self.read(name,True)
         pending=self.pending_restores.get(name)
         if pending is None:
-            return self.read(name,diagnostic)
+            try:
+                result=self.read(name,False)
+            except MissingGroupWindow:
+                if name not in self.pending_restores and self.can_restore_bound_room(self.target(name)):
+                    self.pending_restores[name]=time.monotonic()+15
+                raise
+            self.pending_restores.pop(name,None)
+            return result
         if time.monotonic()<pending:
             raise RuntimeError('等待电脑空闲满 60 秒再检查群窗口')
         # A human may already have opened it. This call reads only the
@@ -731,6 +829,8 @@ class Bridge:
                 self.checking_send = False
             hwnd=before['hwnd']
             use_button=standalone_minimized_room(getattr(self,'main',None),hwnd,getattr(self,'pid',None))
+            if getattr(self,'system_uia',False) and not use_button:
+                return dict(status='deferred',ids=[],note='请将绑定的群独立窗口最小化，再由系统无障碍接口后台发送')
             if not use_button and self._return_focus_is_uncertain(name,hwnd):
                 return dict(status='deferred',ids=[],note='后台跳转后输入焦点未确认；请在该群输入框点一下，再切回其他软件')
             if before['draft']:return dict(status='deferred',ids=[],note='输入框有手动草稿，待清空后发送')
@@ -800,6 +900,10 @@ class Bridge:
 
     def dispatch(self,request):
         command=request['command']
+        if getattr(self,'uia_readonly',False) and command not in ('open','health','read','stop'):
+            raise RuntimeError('当前微信版本仅通过系统无障碍接口观察，未验证发送')
+        if getattr(self,'system_uia',False) and command not in ('open','health','read','send','stop'):
+            raise RuntimeError('当前微信系统接口只支持绑定群窗的读取和后台文字回复')
         if command=='connect':
             supplied=request.get('targets',self.targets)
             if not isinstance(supplied,list) or not 1<=len(supplied)<=64:raise RuntimeError('隐私范围仅限本机配置的授权群')
@@ -807,7 +911,7 @@ class Bridge:
             if len({x['name'] for x in supplied})!=len(supplied):raise RuntimeError('会话显示名重复')
             self.targets=supplied
             return self.connect()
-        if command=='open':return self.open_room(request['group'],request.get('allowForeground') is True)
+        if command=='open':return self.open_room(request['group'],request.get('allowForeground') is True,request.get('bindOpenGroup') is True)
         if command=='health':self.check();return {'healthy':True}
         if command=='read':return self.poll_room(request['group'],request.get('diagnostic',False))
         if command=='clear_unknown_draft':return self.clear_unknown_draft(request)

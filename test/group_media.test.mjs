@@ -80,3 +80,15 @@ test('last voice label can update without creating a context gap or duplicate re
   const changed=gate.observe(target,snap([a,voice('v','语音3"秒小汐，你好')]));assert.equal(changed.gap,undefined);assert.equal(changed.messages[0].text,'小汐，你好');
   assert.equal(gate.observe(target,snap([a,voice('v','语音3"秒小汐，你好')])).messages.length,0);
 });
+
+test('standard UI Automation builds never open the legacy group image cache or reuse its images', async () => {
+  const input = new GroupMediaInput({reader:async () => {throw Error('unexpected cache access')}});
+  for (const nativeMode of ['uia_readonly','uia_standalone']) {
+    const target = session();
+    input.recent.set(target.id, {epoch:target.epoch, at:Date.now(), images:[image()]});
+    const connection = {version:'4.2.0.53', nativeMode};
+    for (const text of ['看看这张图','这是什么车']) {
+      assert.equal(await input.prepare({session:target,request:{text},connection}), null);
+    }
+  }
+});

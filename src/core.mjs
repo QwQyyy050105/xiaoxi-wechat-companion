@@ -1,4 +1,5 @@
 import {deployment,loadDeployment,saveDeployment,validateAliases} from './deployment_config.mjs';
+import {connectionHealth} from './connection_health.mjs';
 import fs from 'node:fs';
 import {ModelHealth,ModelCallError,safeModelError,modelHealthMessage} from './model_health.mjs';
 import {validateModelSettings} from './compatible_api.mjs';
@@ -30,7 +31,7 @@ import {applyDeploymentSettings} from './deployment_settings.mjs';
 import {CODEX_CHAT_MODEL} from './model_policy.mjs';
 import {loadGroupProfile} from './group_profile.mjs';
 import {PublicLookupConversation} from './public_lookup_conversation.mjs';
-import {GroupMediaInput} from './group_media.mjs';
+import {GroupMediaInput,supportsGroupImageCache} from './group_media.mjs';
 import {normalizeNativeMedia} from './native_media.mjs';
 import {loadVoiceTargets,VoiceIntakeScope} from './voice_scope.mjs';
 import {LiveVoiceReadback,wantsVoiceReadback} from './voice_readback.mjs';
@@ -71,7 +72,7 @@ export class Companion extends EventEmitter {
     for(const session of this.store.value.sessions){this.policy.restoreProactive(session.id,session.proactiveUsage);for(const out of this.store.value.outbox.filter(x=>x.sessionId===session.id&&x.kind==='proactive'&&['unknown','local_echo'].includes(x.status)))this.policy.recordProactive(session.id,{outboxId:out.id,status:out.status,nowMs:Date.parse(out.createdAt)});}
   }
   ensureSessions(){for(const t of filterAuthorizedWechatTargets(this.store.value.targets))if(!this.sessionFor(t.id))this.store.createSession(t.name,'desktop_wechat',deployment.account.displayName,t.id);}
-  snapshot(){return {...this.store.snapshot(),mode:this.demo?'demo':'configured',privacy:{policy:CONVERSATION_SCOPE_POLICY,authorizedWechatTargets:getAuthorizedWechatScopes()},connection:this.connection,modelState:this.modelState,modelHealth:this.modelHealth.snapshot(),targetStates:this.targetStates,extensions:this.extensions?.snapshot()??null,persona:this.persona,personaStatus:this.personaStatus,modelInput:this.modelInput,latency:structuredClone(this.latency),busy:[...this.controllers.keys()],capabilities:{text:true,webSearch:this.searchEnabled(),media:this.mediaCapabilityStatus().imageInput,voice:false,senderIdentity:false},voiceReadiness:this.voiceReadiness,mediaCapabilities:this.mediaCapabilityStatus(),mediaStatus:structuredClone(this.groupMedia.status),featureStatus:this.featureStatus(),contextStatus:Object.fromEntries(this.store.value.sessions.map(s=>{const c=this.context.snapshot(s.id);return [s.id,{count:c.messages.length,generation:c.generation,range:c.range}];}))};}
+  snapshot(){return {...this.store.snapshot(),mode:this.demo?'demo':'configured',privacy:{policy:CONVERSATION_SCOPE_POLICY,authorizedWechatTargets:getAuthorizedWechatScopes()},connection:connectionHealth(this.connection,filterAuthorizedWechatTargets(this.store.value.targets),this.targetStates),modelState:this.modelState,modelHealth:this.modelHealth.snapshot(),targetStates:this.targetStates,extensions:this.extensions?.snapshot()??null,persona:this.persona,personaStatus:this.personaStatus,modelInput:this.modelInput,latency:structuredClone(this.latency),busy:[...this.controllers.keys()],capabilities:{text:true,webSearch:this.searchEnabled(),media:this.mediaCapabilityStatus().imageInput,voice:false,senderIdentity:false},voiceReadiness:this.voiceReadiness,mediaCapabilities:this.mediaCapabilityStatus(),mediaStatus:structuredClone(this.groupMedia.status),featureStatus:this.featureStatus(),contextStatus:Object.fromEntries(this.store.value.sessions.map(s=>{const c=this.context.snapshot(s.id);return [s.id,{count:c.messages.length,generation:c.generation,range:c.range}];}))};}
   searchModelSettings(){
     // Explicit projection: search never receives chat history, private cards or
     // inline credentials. These are the settings the built-in Codex search uses.
@@ -82,15 +83,15 @@ export class Companion extends EventEmitter {
   mediaCapabilityStatus(){
     const registered=this.media.capabilities();
     const connected=!this.demo&&process.platform==='win32'&&deployment.native.enabled===true&&this.connection.stage==='connected'&&this.connection.account===deployment.account.displayName&&Number.isInteger(this.connection.pid)&&Number.isFinite(this.connection.created);
-    const cacheConnected=connected&&deployment.native.mediaCache===true;
+    const cacheConnected=connected&&deployment.native.mediaCache===true&&supportsGroupImageCache(this.connection);
     const last=this.groupMedia?.status?.last;const cacheReady=cacheConnected&&last?.ok===true&&last.count>0;
     const plugin=this.extensions?.handlers.get('model')?.call;
     const visionReady=!this.demo&&this.store.value.settings.provider!=='mock'&&(plugin?plugin.capabilities?.vision===true:this.store.value.settings.vision===true);
-    return {...registered,imageInput:registered.imageInput||cacheReady,imageUnderstanding:registered.imageUnderstanding||cacheReady&&visionReady,platformTranscript:registered.platformTranscript||connected,groupCacheConfigured:deployment.native.mediaCache===true,groupCacheCandidates:cacheReady,modelVision:visionReady,autoTranscription:!!this.extensions?.has('transport')&&registered.audioTranscription===true,localWaveFiles:canTranscribeLocalWave(),nativeStatus:this.demo?'disabled_demo':!deployment.native.mediaCache?'not_configured':!connected?'awaiting_connection':!visionReady?'model_vision_not_enabled':last?.ok===false?'resource_unavailable':cacheReady?'experimental_verified':'awaiting_image_read'};
+    return {...registered,imageInput:registered.imageInput||cacheReady,imageUnderstanding:registered.imageUnderstanding||cacheReady&&visionReady,platformTranscript:registered.platformTranscript||connected,groupCacheConfigured:deployment.native.mediaCache===true,groupCacheCandidates:cacheReady,modelVision:visionReady,autoTranscription:!!this.extensions?.has('transport')&&registered.audioTranscription===true,localWaveFiles:canTranscribeLocalWave(),nativeStatus:this.demo?'disabled_demo':!deployment.native.mediaCache?'not_configured':!connected?'awaiting_connection':!supportsGroupImageCache(this.connection)?'unsupported_wechat_build':!visionReady?'model_vision_not_enabled':last?.ok===false?'resource_unavailable':cacheReady?'experimental_verified':'awaiting_image_read'};
   }
   featureStatus(){return [
  {id:1,label:'文字聊天与模型',status:'implemented',detail:'Mock 本机演示；OpenAI-compatible API；已安装且登录的 Codex CLI。自选模型，不自动换模型'},
- {id:2,label:'群聊与后台收发',status:deployment.native.enabled?'experimental':'unsupported',detail:'Windows 微信 4.1.15.56 精确构建实验适配；独立群窗口，账号/群名/版本核验失败即停止；其他版本不猜偏移'},
+ {id:2,label:'群聊与后台收发',status:deployment.native.enabled?'experimental':'unsupported',detail:'Windows 微信 4.2.0.53 支持最小化独立群窗后台收发，4.1.15.56 保留原有适配。其他版本先通过标准无障碍接口观察'},
  {id:3,label:'上下文与记忆',status:'implemented',detail:'同会话上下文、连续接话、停止/等待/换话题；长期记忆由本机主人确认'},
  {id:4,label:'图片',status:deployment.native.mediaCache?'experimental':'unsupported',detail:'缓存需明确配置账号目录与 wechatPeerId；图片与具体消息/发言者未可靠绑定，不将缓存时间当发送顺序'},
  {id:5,label:'语音输入',status:'partially_implemented',detail:'可读取微信自动或手动生成的转写。本地试聊可选择 WAV 转写；传输插件也可提供绑定音频。'},
@@ -150,7 +151,7 @@ export class Companion extends EventEmitter {
     }catch(error){if(!abort.signal.aborted){const health=this.modelHealth.snapshot();this.modelState={stage:'error',message:modelHealthMessage(health),errorCode:error.code??'model_generation_failed',actionRequired:health.actionRequired};this.event('AI 自检未通过：'+(error.code??'model_generation_failed'));}throw error;}
     finally{this.controllers.delete(key);this.update();}
   }
-  async start(){
+  async start({bindOpenedGroups=false}={}){
     if(this.stopping)await this.stopping;
     if(this.running)return;
     this.running=true;const generation=++this.generation;this.connection={stage:'connecting',account:deployment.account.displayName,message:'检查微信账号与兼容版本'};this.update();
@@ -158,10 +159,10 @@ export class Companion extends EventEmitter {
     // Local platform readiness must not wait for a cloud self-check.
     // New input verifies the configured provider; manual self-check stays explicit.
     if(this.modelState.stage==='unchecked'){this.modelState={stage:'unchecked',message:'当前模型尚未核验；新问题到来时尝试，或手动点击测试 AI。'};this.update();}
-    if(this.running&&generation===this.generation)await this.connect(true);
+    if(this.running&&generation===this.generation)await this.connect(true,bindOpenedGroups);
   }
   schedule(ms){clearTimeout(this.timer);if(this.running)this.timer=setTimeout(()=>{void this.tick();},ms);}
-  async connect(allowWindowOpen=false){
+  async connect(allowWindowOpen=false,bindOpenedGroups=false){
     if(!this.running)return;if(this.attempting){this.schedule(1000);return;}this.attempting=true;const generation=this.generation;let localBridge;
     try{
       this.gate.clear();this.ownIds.clear();this.invalidateAll('重新连接');
@@ -171,10 +172,15 @@ export class Companion extends EventEmitter {
       localBridge=this.transportFactory();this.bridge=localBridge;localBridge.start();
       const connection=await localBridge.call('connect',{targets:targets.map(({id,name,kind,windowBinding})=>({id,name,kind,windowBinding}))});
       if(!this.running||generation!==this.generation)return;
-      this.connection={...connection,stage:'connected',message:'已核对配置账号；仅处理连接后新出现的消息'};
+      const readOnly=connection.nativeMode==='uia_readonly';
+      this.connection={...connection,stage:'connected',message:readOnly
+        ? `微信 ${connection.version} 已连接，仅观察已授权会话；后台发送待此版本验收`
+        : '已核对配置账号；仅处理连接后新出现的消息'};
       for(const target of targets){
         if(!this.running||generation!==this.generation)break;
-        try{const snap=this.voiceScope.snapshot(target.id,await localBridge.call('open',{group:target.name,allowForeground:allowWindowOpen}));if(generation!==this.generation)return;this.store.change(s=>s.targets.find(x=>x.id===target.id).windowBinding=snap.windowBinding);this.gate.observe(target,snap);this.seedVisibleBackground(target,snap);this.targetStates[target.id]={stage:'listening',message:'监听中，启动可见内容仅作背景，不补发',lastRead:now()};}
+        const openRequest={group:target.name,allowForeground:allowWindowOpen};
+        if(bindOpenedGroups&&connection.nativeMode==='uia_standalone'&&target.kind==='group'&&!target.windowBinding)openRequest.bindOpenGroup=true;
+        try{const snap=this.voiceScope.snapshot(target.id,await localBridge.call('open',openRequest));if(generation!==this.generation)return;this.store.change(s=>s.targets.find(x=>x.id===target.id).windowBinding=snap.windowBinding);this.gate.observe(target,snap);this.seedVisibleBackground(target,snap);this.targetStates[target.id]={stage:readOnly?'observe_only':'listening',message:readOnly?this.connection.message:'监听中，启动可见内容仅作背景，不补发',lastRead:now()};}
         catch(error){this.targetStates[target.id]={stage:'error',message:error.message};}
       }
       this.event('微信连接已建立；各会话重新建立基线，未补发历史消息。');
@@ -205,6 +211,17 @@ export class Companion extends EventEmitter {
           this.targetStates[target.id]={...this.targetStates[target.id],stage:observed.gap?'gap':'listening',message:observed.gap?'可见消息不连续，已重新建立基线，未补发':snapshot.draft?'监听中；有手动草稿，发送将暂停':'监听中',lastRead:now()};
           if (snapshot.continuity?.unreadBeyondViewport && !observed.gap) {
             this.targetStates[target.id].message = '已读到连续的新消息。微信仍有未读提示，窗口外的消息需跳到最新后读取';
+          }
+          if(this.connection.nativeMode==='uia_readonly'){
+            const state=this.targetStates[target.id];
+            state.stage='observe_only';
+            state.message=this.connection.message;
+            const last=observed.messages.findLast(m=>m.own!==true&&m.role!=='assistant'&&m.inputModality?.kind);
+            if(last){
+              const stage=last.inputModality.kind==='voice_pending'?'waiting_transcript':last.inputModality.kind;
+              state.lastVoice={stage,at:now()};
+            }
+            continue;
           }
           const deferred=this.store.value.outbox.find(x=>x.sessionId===this.sessionFor(target.id)?.id&&x.status==='deferred');
           if(deferred){this.targetStates[target.id].stage='waiting_send';this.targetStates[target.id].message=deferred.note;}
@@ -770,6 +787,7 @@ export class Companion extends EventEmitter {
     if(answer)this.store.change(state=>state.sessions.find(x=>x.id===sessionId).messages.push({id:uid(),role:'assistant',text:answer,createdAt:now()}));this.update();return answer;
   }
   async runTasks(){
+    if(this.connection.nativeMode==='uia_readonly')return;
     if(this.taskRunning||!this.running||!this.bridge)return;this.taskRunning=true;
     try{
       for(const task of this.store.value.tasks.filter(x=>x.status==='scheduled'&&Date.parse(x.dueAt)<=this.nowMs())){
@@ -826,7 +844,7 @@ export class Companion extends EventEmitter {
   }
   async dispatch(action,p={}){
     if(action==='snapshot')return this.snapshot();
-    if(action==='start'){void this.start();return true;}
+    if(action==='start'){void this.start({bindOpenedGroups:true});return true;}
     if(action==='stop'){await this.stop();return true;}
     if(action==='model.check')return await this.checkModel();
     if(action==='voice.status')return await this.refreshReadiness();

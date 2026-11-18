@@ -4,7 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 
 const ignoredDirectories = new Set(['.git', '.test_tmp', 'node_modules', 'data', 'state', 'runtime', 'temp', 'cache', 'logs', '.npm_cache', '.pip_cache', '__pycache__']);
-const textExtensions = new Set(['.mjs','.cjs','.js','.json','.md','.txt','.yml','.yaml','.py','.html','.css','.toml','.ps1','.cmd','.bat','.sh','.xml','.example','.ini','.cfg']);
+const textExtensions = new Set(['.mjs','.cjs','.js','.json','.md','.txt','.yml','.yaml','.py','.html','.css','.toml','.ps1','.cmd','.bat','.sh','.xml','.example','.ini','.cfg','.cs','.manifest']);
 const tokenRules = [
   ['github_token', /(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})/g],
   ['api_secret', /\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}\b/g],

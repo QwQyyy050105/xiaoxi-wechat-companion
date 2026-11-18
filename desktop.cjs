@@ -16,7 +16,9 @@ app.on('second-instance',(_event,argv)=>{
   win.show();win.focus();
 });
 const runFile=path.join(root,'data/client_run.json');
-function runReceipt(clean){fs.writeFileSync(runFile,JSON.stringify({pid:process.pid,at:new Date().toISOString(),cleanShutdown:clean}),{flush:true});}
+const {createRuntimeWriter,writeJsonAtomic}=require('./src/runtime_status.cjs');
+const writeStatus=createRuntimeWriter(path.dirname(runFile));
+function runReceipt(clean){writeJsonAtomic(runFile,{pid:process.pid,at:new Date().toISOString(),cleanShutdown:clean});}
 app.whenReady().then(async()=>{
   try{
     if(!safeStorage.isEncryptionAvailable()||process.platform==='linux'&&safeStorage.getSelectedStorageBackend?.()==='basic_text')throw Error('操作系统密钥存储暂不可用；未创建明文聊天或密钥文件');
@@ -47,7 +49,7 @@ app.whenReady().then(async()=>{
       const diagnostic=JSON.stringify([state.modelInput?.callId,state.modelInput?.stage,state.personaStatus?.sha256,state.personaStatus?.lastError?.code,state.latency?.recent.at(-1)?.requestId]);
       if(Date.now()-lastStatus>3000||diagnostic!==lastDiagnostic){lastStatus=Date.now();lastDiagnostic=diagnostic;
         const status={at:new Date().toISOString(),pid:process.pid,appVersion,privacy:state.privacy,media:state.mediaStatus,mediaCapabilities:state.mediaCapabilities,searchEnabled:state.settings.allowSearch===true,personaVersion:core.persona.schema_version,persona:state.personaStatus,modelInput:state.modelInput,latency:state.latency,connection:state.connection,model:state.modelState.stage,modelHealth:state.modelHealth,targets:state.targetStates,voiceReplies:Object.fromEntries(state.targets.filter(t=>t.lastNativeVoiceReply).map(t=>[t.id,t.lastNativeVoiceReply])),busy:state.busy.length,inbox:state.inbox.map(({status})=>status),outbox:state.outbox.map(({status})=>status),memoryCount:state.memories.length};
-        fs.writeFileSync(path.join(root,'data/runtime_status.json'),JSON.stringify(status,null,2));
+        writeStatus(status);
       }
     });
     await win.loadFile(path.join(root,'public/client.html'));

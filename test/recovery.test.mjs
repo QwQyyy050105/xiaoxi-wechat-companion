@@ -188,3 +188,34 @@ test('a stale drain does not revive a queue for a target whose bound identity ch
  finishOld({text:'旧回答'});await waitFor(()=>core.processing.size===0);
  assert.equal(modelCalls,1);assert.equal(sent.length,0);assert.equal(core.store.value.outbox.length,0);
 });
+
+
+test('only the owner panel connect action binds an unbound configured group on a verified build',async t=>{
+ const {core}=fixture(t,async()=>({text:'unused'}));
+ core.schedule=()=>{};
+ const opened=[];
+ let mode='uia_standalone';
+ core.transportFactory=()=>{
+  const worker=fakeTransportFactory()(),original=worker.call.bind(worker);
+  worker.call=async(command,request={})=>{
+   if(command==='connect')return {...await original(command,request),nativeMode:mode,version:'fixture'};
+   if(command==='open'){
+    opened.push({...request});
+    if(!request.bindOpenGroup&&!core.store.value.targets.find(t=>t.name===request.group).windowBinding)throw Error('manual initial binding required');
+   }
+   return original(command,request);
+  };
+  return worker;
+ };
+ core.store.change(state=>{state.targets.find(t=>t.id!==target.id).windowBinding='ChatSingleWindow567@chatroom';});
+ await core.start();
+ assert.ok(opened.length>=2);assert.ok(opened.every(row=>!row.bindOpenGroup));
+ assert.equal(core.store.value.targets.find(t=>t.id===target.id).windowBinding,undefined);
+ await core.stop();opened.length=0;mode='uia_readonly';
+ await core.dispatch('start',{});await waitFor(()=>!core.attempting&&opened.length>=2);
+ assert.ok(opened.every(row=>!row.bindOpenGroup));
+ await core.stop();opened.length=0;mode='uia_standalone';
+ await core.dispatch('start',{});await waitFor(()=>!core.attempting&&opened.length>=2);
+ assert.deepEqual(opened.filter(row=>row.bindOpenGroup).map(row=>row.group),[target.name]);
+ assert.ok(core.store.value.targets.find(t=>t.id===target.id).windowBinding);
+});

@@ -50,7 +50,9 @@ Parallel same-request tail recovery is not included. No owner/panel switch exist
 
 Open a group once in a separate WeChat window and connect it to establish its local identity. To let startup recover it later, put its configured ID in `native.backgroundRestoreTargetIds`, for example `["weekend_club"]`. The default is empty. This option targets the official standalone Windows WeChat 4.1.15.56 main window while it is minimized. Leave the group's row visible in its session list before minimizing.
 
-At startup or explicit reconnect, the receiver checks for existing windows first. For a missing selected group, it waits for at least 60 seconds without keyboard or mouse input. While waiting it checks every 15 seconds. WeChat may briefly take focus while creating its group window. If an attempt cannot be verified the receiver continues to look for the window and does not repeat the double-click in that WeChat process. Manually opened windows can be used at any time.
+On 4.1.15.56, recovery also runs after an automatic reconnect or when a selected group's previously bound window closes during a session. The receiver first checks for the existing window. It waits for 60 seconds of keyboard and mouse inactivity before trying to restore a missing window, checking every 15 seconds. WeChat may briefly take focus when creating the window. If the outcome is uncertain the receiver waits for a manually opened window.
+
+On 4.2.0.53, double-click the authorized group in the bot account's chat list once to open its separate window. You can then minimize it. This build has been tested for background reads and text sends with the group minimized. If you close the window, the receiver detects it when you reopen it. Other signed builds remain observation-only pending validation.
 
 ## 后台启动控制面板
 

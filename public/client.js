@@ -2,6 +2,7 @@ const $=id=>document.getElementById(id);
 let state,settingsLoaded=false,localSession,personaLoaded=false,deploymentConfig;
 const titles={home:'连接与状态',targets:'会话管理',chat:'本地试聊',memory:'会话记忆',tasks:'提醒任务',settings:'模型与启动',events:'运行记录',persona:'人格与参与',deployment:'账号与授权'};
 const stages={stopped:'已停止',connecting:'正在连接',connected:'微信已连接',waiting:'等待微信',unchecked:'尚未测试',checking:'正在测试',ready:'AI 已就绪',error:'需要处理',listening:'监听中',gap:'已重新同步',waiting_send:'等待手动操作结束',paused:'已暂停',generating:'正在回答',waiting_input:'等待你说完'};
+stages.observe_only='仅观察';
 const taskStages={proposed:'等待主人确认',scheduled:'已确认，等待时间',claimed:'正在处理',local_echo:'本机气泡已确认',unknown:'发送未确认，不重发',not_sent:'未发送',cancelled:'已取消',missed:'已错过，不补发'};
 const featureStages={not_implemented:'未实现',implemented_pending_validation:'实现待验收',implemented_pending_acceptance:'实现待验收',implemented:'实现待验收',verified:'已验证',blocked:'真实阻塞',partially_implemented:'部分实现，仍有阻塞'};
 const voiceReasons={transport_unsupported:'微信音频交付尚未验收',voice_not_approved:'小汐声线尚未选定',fatal_whea_unresolved:'共享推理保持暂停',generation_not_implemented:'共享层目前仅提供就绪检查',provider_missing_or_unavailable:'共享语音状态不可读取',status_timeout:'共享语音状态检查超时',status_busy:'已有语音状态检查在进行',provider_role_mismatch:'共享角色不匹配',provider_contract_invalid:'共享接口待核对',status_not_checked:'语音状态尚未检查'};
@@ -127,7 +128,7 @@ function renderCapabilities(s){
 }
 function render(s){
   state=s;if(!personaLoaded){fillPersona(s);personaLoaded=true;}localSession=s.sessions.find(x=>x.channel==='local');
-  $('connection-status').textContent=stages[s.connection.stage]||s.connection.stage;
+  $('connection-status').textContent=s.connection.health?.label||stages[s.connection.stage]||s.connection.stage;
   $('connection-message').textContent=s.connection.message;
   $('model-status').textContent=stages[s.modelState.stage]||s.modelState.stage;
   $('model-message').textContent=s.modelState.message;

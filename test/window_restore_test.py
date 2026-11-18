@@ -161,10 +161,52 @@ class IdlePoll(unittest.TestCase):
         self.client.pending_restores['Example']=0
         with patch.object(restore,'matching_windows',return_value=set()),patch.object(self.module,'focus_state',return_value={}),patch.object(restore,'require_idle'),patch.object(self.module,'windows',return_value=[]),patch.object(restore,'restore_group',side_effect=RuntimeError('uncertain')) as opener:
             with self.assertRaisesRegex(RuntimeError,'uncertain'):self.client.poll_room('Example')
-            self.assertEqual(self.client.pending_restores,{})
-            self.client.poll_room('Example')
+            self.assertEqual(self.client.pending_restores,{'Example':None})
+            self.client.read.side_effect=self.module.MissingGroupWindow('missing')
+            with self.assertRaises(self.module.MissingGroupWindow):self.client.poll_room('Example')
             with self.assertRaisesRegex(RuntimeError,'手动打开'):self.client.open_room('Example',False)
             opener.assert_called_once()
+            self.client.read.side_effect=None
+            self.client.poll_room('Example')
+            self.assertEqual(self.client.pending_restores,{})
+
+    def test_passive_reconnect_queues_only_bound_opted_in_group(self):
+        with patch.object(self.module,'windows',return_value=[]),patch.object(restore,'restore_group') as opener:
+            with self.assertRaisesRegex(RuntimeError,'等待电脑空闲'):self.client.open_room('Example',False)
+            deadline=self.client.pending_restores['Example']
+            with self.assertRaises(RuntimeError):self.client.open_room('Example',False)
+            self.assertEqual(self.client.pending_restores['Example'],deadline)
+            opener.assert_not_called()
+
+    def test_running_listener_rearms_after_a_verified_window_later_closes(self):
+        self.client.read.side_effect=[{'ok':True},self.module.MissingGroupWindow('missing')]
+        self.client.poll_room('Example')
+        with self.assertRaises(self.module.MissingGroupWindow):self.client.poll_room('Example')
+        self.assertIn('Example',self.client.pending_restores)
+
+    def test_system_adapter_never_restores_even_with_verified_sending(self):
+        self.client.system_uia=True
+        self.client.uia_readonly=False
+        self.client.read.side_effect=self.module.MissingGroupWindow('missing')
+        with self.assertRaises(self.module.MissingGroupWindow):self.client.poll_room('Example')
+        self.assertEqual(self.client.pending_restores,{})
+
+    def test_identity_errors_never_schedule_restore(self):
+        self.client.read.side_effect=RuntimeError('same name different peer')
+        with self.assertRaisesRegex(RuntimeError,'different peer'):self.client.poll_room('Example')
+        self.assertEqual(self.client.pending_restores,{})
+
+    def test_diagnostics_and_unapproved_or_readonly_groups_do_not_arm(self):
+        self.client.read.side_effect=self.module.MissingGroupWindow('missing')
+        with self.assertRaises(self.module.MissingGroupWindow):self.client.poll_room('Example',True)
+        self.assertEqual(self.client.pending_restores,{})
+        for readonly,selected,binding,kind in [(True,True,True,'group'),(False,False,True,'group'),(False,True,False,'group'),(False,True,True,'direct')]:
+            self.client.uia_readonly=readonly
+            self.client.restore_targets={'example'} if selected else set()
+            self.client.target=lambda name:{'id':'example','kind':kind,'windowBinding':'ChatSingleWindow1' if binding else None,'peerId':'ChatSingleWindow1' if binding else None}
+            with self.subTest(readonly=readonly,selected=selected,binding=binding,kind=kind):
+                with self.assertRaises(self.module.MissingGroupWindow):self.client.poll_room('Example')
+                self.assertEqual(self.client.pending_restores,{})
 
 class SessionPoint(unittest.TestCase):
     def test_physical_pixels_and_full_viewport_are_required(self):

@@ -87,6 +87,45 @@ async function idle(core) {
     await new Promise(resolve=>setTimeout(resolve,10));
   }
 }
+test('panel distinguishes a missing window from read-only observation on open and after recovery',async t=>{
+  const {core}=fixture(t);
+  const rooms=core.store.value.targets.filter(target=>target.enabled);
+  assert.equal(rooms.length,2);
+  const missing=new Set(rooms.map(room=>room.name));
+  core.transportFactory=()=>({child:{},start(){},async stop(){this.child=null;},async kill(){this.child=null;},async call(command,args){
+    if(command==='connect')return {nativeMode:'uia_readonly',version:'example'};
+    if(command==='health')return {healthy:true};
+    assert.ok(command==='read'||command==='open');
+    if(missing.has(args.group))throw Error('window unavailable');
+    return frame();
+  }});
+  await core.connect();
+  assert.equal(core.snapshot().connection.health.status,'unavailable');
+  missing.delete(rooms[0].name);
+  await core.connect();
+  assert.equal(core.targetStates[rooms[0].id].stage,'observe_only');
+  assert.equal(core.targetStates[rooms[1].id].stage,'error');
+  const partial=core.snapshot().connection;
+  assert.deepEqual([partial.health.status,partial.health.readable,partial.health.total],['partial',1,2]);
+  assert.match(partial.message,/仅观察/u);
+  missing.clear();
+  await core.tick();
+  const recovered=core.snapshot().connection;
+  assert.deepEqual([recovered.health.status,recovered.health.readable,recovered.health.total],['observe_only',2,2]);
+  assert.match(recovered.message,/自动回复及后台发送尚未启用/u);
+});
+test('an unqualified native build can observe authorized voice without queuing replies or reminders',async t=>{
+  const {core,target,poll,models,sent}=fixture(t);
+  core.connection={stage:'connected',nativeMode:'uia_readonly',version:'example',message:'仅观察'};
+  await poll();
+  await poll(row('voice'));
+  await poll(row('voice',core.policy.names[0]+'，提醒我十分钟后买牛奶'));
+  assert.equal(core.targetStates[target.id].stage,'observe_only');
+  assert.equal(core.targetStates[target.id].lastVoice.stage,'platform_transcript');
+  assert.equal(core.store.value.inbox.length,0);
+  assert.equal(core.store.value.tasks.length,0);
+  assert.equal(models.length,0);assert.equal(sent.length,0);
+});
 test('group requests newest voice while a previous one has text; its later unattributed transcript sends exactly once via normal outbox',async t=>{
   const {core,target,sent,models}=fixture(t);
   const alias=core.policy.names[0];
@@ -119,8 +158,9 @@ test('a directly addressed voice already transcribed on first live observation r
   assert.deepEqual(sent.map(x=>x.group),[target.name]);
 });
 
-test('a live voice receives a single direct reply after its in-place conversion',async t=>{
+test('the standalone WeChat adapter routes an in-place voice transcript to one model reply and one send',async t=>{
   const {core,poll,sent,models}=fixture(t);
+  core.connection={stage:'connected',version:'4.2.0.53',nativeMode:'uia_standalone'};
   await poll();
   await poll(row('one'));
   await poll(row('one','正在转文字'));
